@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import random
 
+
 class SignalDatasetGenerator:
     def __init__(self, num_samples, sample_rate, duration, freq_range=(10, 100)):
         self.num_samples = num_samples
@@ -97,6 +98,39 @@ class SignalDatasetGenerator:
 
         return t, noise
 
+    def generate_polygauss_noise(self, components=3, weights=None, means=None, stds=None):
+        """
+        Generates Poly-Gaussian noise: a mixture of multiple Gaussian distributions.
+
+        Parameters:
+            components (int): Number of Gaussian components.
+            weights (list or None): Weights for each Gaussian component (should sum to 1).
+            means (list or None): Means of each Gaussian component.
+            stds (list or None): Standard deviations of each Gaussian component.
+
+        Returns:
+            t (np.ndarray): Time vector.
+            noise (np.ndarray): Generated poly-Gaussian noise.
+        """
+        t = np.linspace(0, self.duration, int(self.sample_rate * self.duration), endpoint=False)
+        n = len(t)
+
+        # Default random parameters if not provided
+        if weights is None:
+            weights = np.random.dirichlet(np.ones(components))
+        if means is None:
+            means = np.random.uniform(-2, 2, components)
+        if stds is None:
+            stds = np.random.uniform(0.5, 1.5, components)
+
+        # Choose component for each point
+        component_choices = np.random.choice(components, size=n, p=weights)
+        noise = np.array([
+            np.random.normal(loc=means[c], scale=stds[c]) for c in component_choices
+        ])
+
+        return t, noise
+
     def generate_dataset(self):
         """Генерує датасет із сигналами та шумами."""
         clean_signals = []
@@ -130,6 +164,19 @@ class SignalDatasetGenerator:
             if random.choice([True, False]):
                 _, wifi_noise = self.generate_wifi_like_noise()
                 non_gaussian_noise += wifi_noise
+            if random.choice([True, False]):
+                components = random.randint(2, 5)  # Random number of components between 2 and 5
+                weights = np.random.dirichlet(np.ones(components))
+                means = np.random.uniform(-2, 2, components)
+                stds = np.random.uniform(0.3, 1.5, components)
+
+                _, polygauss_noise = self.generate_polygauss_noise(
+                    components=components,
+                    weights=weights,
+                    means=means,
+                    stds=stds
+                )
+                non_gaussian_noise += polygauss_noise
 
             non_gaussian_signals.append(signal + non_gaussian_noise)
 
