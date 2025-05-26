@@ -51,6 +51,9 @@ class TimeSeriesTransformer(nn.Module):
         :param x: Вхідний зашумлений сигнал (batch_size, sequence_length, input_dim).
         :return: Очищений сигнал (batch_size, sequence_length, input_dim).
         """
+        assert x.dim() == 3, f"Expected input shape (B, T, F), got {x.shape}"
+        if x.shape[1] < x.shape[2]:  # Shape is likely (B, F, T)
+            x = x.permute(0, 2, 1)  # Change to (B, T, F)
         x = self.input_projection(x) + self.positional_encoding
         x = self.transformer_encoder(x)
         x = self.output_projection(x)
