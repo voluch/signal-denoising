@@ -1,12 +1,13 @@
-from models.time_series_trasformer import TimeSeriesTransformer
-from adapters import TimeSeriesTransformerAdapter
+import uuid
+
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset, random_split
 import wandb
-from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, \
-    SignalToNoiseRatio  # Assumes you saved metrics in metrics.py
+from torch.utils.data import DataLoader, TensorDataset, random_split
+
+from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
+from models.time_series_trasformer import TimeSeriesTransformer
 
 wandb.login(key="")
 
@@ -23,12 +24,12 @@ class Trainer:
         self.random_state = random_state
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Set reproducibility
         np.random.seed(self.random_state)
         torch.manual_seed(self.random_state)
 
-        # Initialize W&B
-        wandb.init(project=wandb_project, name=f"{model_name}_{dataset_type}", config={
+        # Unique run name
+        run_name = f"{model_name}_{dataset_type}_{uuid.uuid4().hex[:8]}"
+        wandb.init(project=wandb_project, name=run_name, config={
             "model": model_name,
             "dataset": dataset_type,
             "epochs": epochs,
@@ -41,8 +42,8 @@ class Trainer:
         noisy_signals = np.load(f"dataset/{self.dataset_type}_signals.npy")
         clean_signals = np.load("dataset/clean_signals.npy")
 
-        X = torch.tensor(noisy_signals, dtype=torch.float32).unsqueeze(1)  # [B, 1, T]
-        y = torch.tensor(clean_signals, dtype=torch.float32).unsqueeze(1)  # [B, 1, T]
+        X = torch.tensor(noisy_signals, dtype=torch.float32).unsqueeze(-1)  # [B, T, 1]
+        y = torch.tensor(clean_signals, dtype=torch.float32).unsqueeze(-1)  # [B, T, 1]
 
         dataset = TensorDataset(X, y)
         total_len = len(dataset)
@@ -75,11 +76,8 @@ class Trainer:
             for X_batch, y_batch in train_loader:
                 X_batch, y_batch = X_batch.to(self.device), y_batch.to(self.device)
                 optimizer.zero_grad()
-                processed_input = self.model.process_input(X_batch)
-                processed_target = self.model.process_target(y_batch)
-                y_pred = self.model(processed_input)
-                loss = criterion(y_pred, processed_target)
-
+                y_pred = self.model(X_batch)
+                loss = criterion(y_pred, y_batch)
                 loss.backward()
                 optimizer.step()
 
@@ -87,11 +85,9 @@ class Trainer:
                 epoch_train_outputs.append(y_pred.detach().cpu().numpy())
                 epoch_train_targets.append(y_batch.cpu().numpy())
 
-            # Evaluate on validation set
             val_metrics = self.compute_epoch_metrics(val_loader)
             train_metrics = self.compute_epoch_metrics_from_numpy(epoch_train_outputs, epoch_train_targets)
 
-            # Log all metrics
             wandb.log({
                 "train_mse": train_metrics["MSE"],
                 "train_mae": train_metrics["MAE"],
@@ -114,12 +110,11 @@ class Trainer:
                   f"Val SNR: {val_metrics['SNR']:.2f} dB")
 
         # Save best model
-        model_path = f"{self.model_name}_{self.dataset_type}_best.pth"
+        model_path = f"weights/{self.model_name}_{self.dataset_type}_best.pth"
         torch.save(best_weights, model_path)
         print(f"✅ Best model saved to {model_path}")
         self.model.load_state_dict(best_weights)
 
-        # Final Evaluation
         self.final_eval_metrics = self.evaluate_metrics(test_loader)
 
     def compute_epoch_metrics(self, loader):
@@ -175,7 +170,6 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    # Settings
     input_dim = 1
     sequence_length = 1000  # or whatever your dataset uses
     dataset_type = "gaussian"  # or "non_gaussian"
@@ -185,12 +179,10 @@ if __name__ == "__main__":
     learning_rate = 1e-4
     wandb_project = "signal-denoising"
 
-    model = TimeSeriesTransformer(input_dim=1)
-    adapter = TimeSeriesTransformerAdapter(model)
+    model = TimeSeriesTransformer(input_dim=input_dim)
 
-    # Initialize and run trainer
     trainer = Trainer(
-        model=adapter,
+        model=model,
         model_name="TimeSeriesTransformer",
         dataset_type=dataset_type,
         batch_size=batch_size,

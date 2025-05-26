@@ -1,15 +1,18 @@
+import uuid
+
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, random_split
-from scipy.signal import stft
 import wandb
+from scipy.signal import stft
+from torch.utils.data import DataLoader, TensorDataset, random_split
 
 wandb.login(key="")
 
 from models.autoencoder_vae import SpectrogramVAE
 from metrics import MeanSquaredError, MeanAbsoluteError, RootMeanSquaredError, SignalToNoiseRatio
+
 
 class VAETrainer:
     def __init__(self, dataset_type="gaussian", batch_size=32, epochs=50, learning_rate=1e-3,
@@ -34,6 +37,16 @@ class VAETrainer:
             "lr": learning_rate
         })
 
+        run_name = f"VAE_{dataset_type}_{uuid.uuid4().hex[:8]}"
+        wandb.init(project=wandb_project, name=run_name, config={
+            "model": "VAE",
+            "dataset": dataset_type,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "random_state": random_state
+        })
+
         self.train_loader, self.val_loader, self.test_loader, self.freq_bins, self.time_frames = self.load_data()
 
         self.model = SpectrogramVAE(freq_bins=self.freq_bins,
@@ -55,8 +68,10 @@ class VAETrainer:
         noisy = np.load(f"dataset/{self.dataset_type}_signals.npy")
         clean = np.load("dataset/clean_signals.npy")
 
-        assert noisy.shape[1] == self.signal_len, f"Noisy signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
-        assert clean.shape[1] == self.signal_len, f"Clean signal length mismatch: expected {self.signal_len}, got {clean.shape[1]}"
+        assert noisy.shape[
+                   1] == self.signal_len, f"Noisy signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
+        assert clean.shape[
+                   1] == self.signal_len, f"Clean signal length mismatch: expected {self.signal_len}, got {clean.shape[1]}"
 
         X = torch.tensor(noisy[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
         y = torch.tensor(clean[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
@@ -136,9 +151,9 @@ class VAETrainer:
             }, step=epoch)
 
             print(f"Epoch {epoch:02d} | "
-                  f"Train Loss: {total_loss/len(self.train_loader):.2f} | "
+                  f"Train Loss: {total_loss / len(self.train_loader):.2f} | "
                   f"Val Loss: {val_loss:.2f} | "
-                  f"Val MSE: {val_metrics['MSE']:.2f} dB")
+                  f"Val MSE: {val_metrics['MSE']:.2f}")
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -230,7 +245,7 @@ class VAETrainer:
         for mag, phase in zip(out_mag, phases):
             Zxx_denoised = mag * np.exp(1j * phase)
             _, rec = istft(Zxx_denoised, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
-            rec = rec[self.pad : self.pad + self.signal_len]
+            rec = rec[self.pad: self.pad + self.signal_len]
             if len(rec) < self.signal_len:
                 rec = np.pad(rec, (0, self.signal_len - len(rec)))
             elif len(rec) > self.signal_len:
@@ -241,5 +256,22 @@ class VAETrainer:
 
 
 if __name__ == "__main__":
-    trainer = VAETrainer(dataset_type="gaussian", signal_len=1000)
+    input_dim = 1
+    dataset_type = "gaussian"  # or "non_gaussian"
+    random_state = 42
+    batch_size = 32
+    epochs = 50
+    learning_rate = 1e-4
+    wandb_project = "signal-denoising"
+    signal_len = 1000
+
+    trainer = VAETrainer(
+        dataset_type=dataset_type,
+        batch_size=batch_size,
+        epochs=epochs,
+        learning_rate=learning_rate,
+        random_state=random_state,
+        wandb_project=wandb_project,
+        signal_len=1000
+    )
     trainer.train()
