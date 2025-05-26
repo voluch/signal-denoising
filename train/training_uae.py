@@ -23,8 +23,8 @@ class UnetAutoencoderTrainer:
         self.lr = learning_rate
         self.signal_len = signal_len
         self.fs = fs
-        self.nperseg = nperseg
-        self.noverlap = nperseg // 2
+        self.nperseg = 128
+        self.noverlap = 96
         self.pad = self.nperseg // 2
         self.random_state = random_state
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -44,12 +44,12 @@ class UnetAutoencoderTrainer:
         self.model = UnetAutoencoder(self.input_shape).to(self.device)
 
     def signal_to_mag(self, signal_batch):
-        # signal_batch: [B, signal_len]
         mags = []
         for s in signal_batch:
-            _, _, mag, _ = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
+            _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
+            mag = np.abs(Zxx)
             mags.append(mag)
-        return torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)  # [B, 1, F, T]
+        return torch.tensor(np.stack(mags), dtype=torch.float32).unsqueeze(1).to(self.device)
 
     def load_data(self):
         noisy = np.load(f"../dataset/{self.dataset_type}_signals.npy")
@@ -60,7 +60,8 @@ class UnetAutoencoderTrainer:
 
         # Save shapes for reference
         # Get input_shape for model
-        _, _, mag, _ = stft(clean[0], fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
+        _, _, Zxx = stft(clean[0], fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
+        mag = np.abs(Zxx)
         input_shape = mag.shape
 
         dataset = TensorDataset(
@@ -128,13 +129,13 @@ class UnetAutoencoderTrainer:
             }, step=epoch)
 
             print(f"Epoch {epoch:02d} | Train Loss: {total_loss / len(self.train_loader):.6f} | "
-                  f"Val Loss: {val_loss:.6f} | Val SNR: {val_metrics['SNR']:.2f} dB")
+                  f"Val Loss: {val_loss:.6f} | Val SNR: {val_metrics['MSE']:.2f}")
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 best_weights = self.model.state_dict()
 
-        model_path = f"SpectrogramAutoencoder_{self.dataset_type}_best.pth"
+        model_path = f"../weights/UnetAutoencoder_{self.dataset_type}_best.pth"
         torch.save(best_weights, model_path)
         print("✅ Best model saved.")
         self.model.load_state_dict(best_weights)
@@ -203,7 +204,8 @@ class UnetAutoencoderTrainer:
         mags = []
         phases = []
         for s in signal_batch_np:
-            _, _, mag, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
+            _, _, Zxx = stft(s, fs=self.fs, nperseg=self.nperseg, noverlap=self.noverlap)
+            mag = np.abs(Zxx)
             mags.append(mag)
             phases.append(np.angle(Zxx))
 
@@ -228,7 +230,7 @@ if __name__ == "__main__":
     epochs = 50
     learning_rate = 1e-4
     wandb_project = "signal-denoising"
-    signal_len = 1000
+    signal_len = 2144
 
     trainer = UnetAutoencoderTrainer(
         dataset_type="gaussian",
