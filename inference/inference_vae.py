@@ -7,10 +7,10 @@ from models.autoencoder_vae import SpectrogramVAE
 
 # --- Configurable Parameters ---
 dataset_type = "gaussian"         # or "non_gaussian"
-signal_len = 1000
+signal_len = 2144
 fs = 1024
-nperseg = 256
-noverlap = nperseg // 2
+nperseg = 128
+noverlap = 96
 pad = nperseg // 2
 random_state = 42
 batch_size = 32
@@ -85,7 +85,7 @@ plt.plot(t, rec, label='Denoised', linestyle='--', linewidth=2)
 plt.xlabel("Time [s]")
 plt.ylabel("Amplitude")
 plt.ylim([-2,2])
-plt.xlim([0,0.4])
+plt.xlim([0,0.8])
 plt.title(f"Sample #{sample_index} from test set ({dataset_type})")
 plt.legend()
 plt.grid(True)
