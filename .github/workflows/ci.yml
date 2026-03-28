@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - containerize-training
     paths-ignore:
         - README.md
         - .github/**
