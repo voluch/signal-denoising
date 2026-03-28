@@ -55,11 +55,23 @@ if __name__ == '__main__':
     REGISTRY_ID = os.environ['REGISTRY_ID']
     VOLUME_SIZE_GB = int(os.environ['VOLUME_SIZE_GB'])
     VOLUME_MOUNT_PATH = os.environ['VOLUME_MOUNT_PATH']
-    OMP_NUM_THREADS = os.environ['OMP_NUM_THREADS']
-    MKL_NUM_THREADS = os.environ['MKL_NUM_THREADS']
+    DATASET_PATH = os.environ['DATASET_PATH']
+    WANDB_PROJECT = os.environ['WANDB_PROJECT']
+    EXTRA_DOCKER_ARGS = os.environ['EXTRA_DOCKER_ARGS']
+    WANDB_API_KEY_SECRET = os.environ.get('RUNPOD_API_KEY_SECRET', '')
+    AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
+    AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
+    S3_BUCKET = os.environ.get('S3_BUCKET', '')
     EXTRA_ENVS_STR = os.environ['EXTRA_ENVS_STR']
 
     print(f"Managing template: {TEMPLATE_NAME}")
+
+    # Build dockerArgs: --dataset <DATASET_PATH> --wandb-project <WANDB_PROJECT> <EXTRA_DOCKER_ARGS>
+    docker_args = f"--dataset {DATASET_PATH}"
+    if WANDB_PROJECT:
+        docker_args += f" --wandb-project {WANDB_PROJECT}"
+    if EXTRA_DOCKER_ARGS:
+        docker_args += f" {EXTRA_DOCKER_ARGS}"
 
     # Get existing templates
     query = """
@@ -85,19 +97,18 @@ if __name__ == '__main__':
     # Build mutation
     id_field = f'id: "{found_template["id"]}"' if found_template else ''
 
-    # Base environment variables
+    # Base environment variables for the training script
     base_env_vars = [
         {"key": "PYTHONUNBUFFERED", "value": "1"},
-        {"key": "NVIDIA_VISIBLE_DEVICES", "value": "all"},
-        {"key": "FLAGS_selected_gpus", "value": "0"},
-        {"key": "FLAGS_use_nccl", "value": "False"},
-        {"key": "OMP_NUM_THREADS", "value": str(OMP_NUM_THREADS)},
-        {"key": "MKL_NUM_THREADS", "value": str(MKL_NUM_THREADS)},
-        {"key": "USE_GPU", "value": "true"},
-        {"key": "FRAME_FPS", "value": "10"},
-        {"key": "IS_LOWER_CASE", "value": "true"},
-        {"key": "MAX_SEGMENT_SECONDS", "value": "10"},
     ]
+    if WANDB_API_KEY_SECRET:
+        base_env_vars.append({"key": "WANDB_API_KEY", "value": WANDB_API_KEY_SECRET})
+    if AWS_ACCESS_KEY_ID:
+        base_env_vars.append({"key": "AWS_ACCESS_KEY_ID", "value": AWS_ACCESS_KEY_ID})
+    if AWS_SECRET_ACCESS_KEY:
+        base_env_vars.append({"key": "AWS_SECRET_ACCESS_KEY", "value": AWS_SECRET_ACCESS_KEY})
+    if S3_BUCKET:
+        base_env_vars.append({"key": "S3_BUCKET", "value": S3_BUCKET})
 
     # Parse extra environment variables
     extra_env_vars = parse_extra_envs(EXTRA_ENVS_STR)
@@ -131,7 +142,7 @@ if __name__ == '__main__':
             {id_field}
             name: "{TEMPLATE_NAME}"
             imageName: "{IMAGE_URI}"
-            dockerArgs: ""
+            dockerArgs: "{docker_args}"
             containerRegistryAuthId: "{REGISTRY_ID}"
             containerDiskInGb: 30
             volumeInGb: {VOLUME_SIZE_GB}

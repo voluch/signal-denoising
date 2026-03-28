@@ -129,7 +129,7 @@ def manage_pod():
             sys.exit(0)
 
     # Deploy new pod
-    print("Deploying new pod in data center {DATA_CENTER_ID} ...")
+    print(f"Deploying new pod in data center {DATA_CENTER_ID} ...")
 
     if USE_SPOT:
         mutation_name = "podRentInterruptable"
