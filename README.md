@@ -169,6 +169,44 @@ cp .env.template .env
 
 ---
 
+## Тренування у Docker
+
+Для зручності тренування на сервері можна використати Docker. Образ містить всі залежності (PyTorch, CUDA, etc).
+
+### Побудова образу
+
+```bash
+docker build -t signal-denoising-train .
+```
+
+### Запуск тренування
+
+Вам потрібно прокинути папку з датасетом у контейнер через `--volume` (або `-v`).
+
+```bash
+# Припустимо, датасет знаходиться в ./data_generation/datasets/my_dataset
+docker run --rm -it \
+  --gpus all \
+  -v "$(pwd)/data_generation/datasets:/app/data_generation/datasets" \
+  signal-denoising-train \
+  --dataset data_generation/datasets/my_dataset \
+  --wandb-project my-denoising-project
+```
+
+Якщо потрібно передати `WANDB_API_KEY`, використовуйте `-e`:
+
+```bash
+docker run --rm -it \
+  --gpus all \
+  -e WANDB_API_KEY=your_key_here \
+  -v "$(pwd)/data_generation/datasets:/app/data_generation/datasets" \
+  signal-denoising-train \
+  --dataset data_generation/datasets/deep_space_polygauss_qpsk_bs1024_n3000_993897f3 \
+  --wandb-project my-denoising-project
+```
+
+Результати (ваги та звіти) будуть збережені всередині папки датасету, яка прокинута з хост-системи.
+
 ## Швидкий старт
 
 ```bash
