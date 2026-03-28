@@ -38,3 +38,4 @@ typing_extensions==4.12.2
 urllib3<2.4
 python-dotenv==1.0.1
 wandb==0.19.11
+boto3==1.42.78

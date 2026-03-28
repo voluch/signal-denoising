@@ -244,6 +244,37 @@ python data_generation/evaluate_dataset.py --help
 Скрипт читає `dataset_config.json`, автоматично встановлює `window_size = block_size`
 і зберігає результати у `<run_folder>/dataset_evaluation/`.
 
+---
+
+## Завантаження датасету в S3
+
+Для хмарного тренування згенерований датасет потрібно завантажити в S3.
+Для цього використовуйте скрипт `data_generation/push_to_s3.py`.
+
+### Налаштування
+
+1. Переконайтеся, що у вас заповнені AWS-ключі у файлі `.env` (в корені проекту):
+   ```bash
+   AWS_ACCESS_KEY=...
+   AWS_SECRET_ACCESS_KEY=...
+   S3_BUCKET=signal-denoising-datasets
+   ```
+2. Встановіть залежності:
+   ```bash
+   pip install boto3 python-dotenv
+   ```
+
+### Використання
+
+```bash
+# Завантажити конкретний датасет (S3 префікс буде такий же, як назва папки)
+python data_generation/push_to_s3.py data_generation/datasets/fpv_telemetry_...
+```
+
+Скрипт рекурсивно завантажить усі файли датасету (train, test, config).
+
+---
+
 ### Логіка оцінки
 
 Ключове питання: **чи охоплює датасет достатньо широкий спектр статистичних режимів шуму?**
