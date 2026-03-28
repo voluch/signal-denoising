@@ -16,10 +16,13 @@ Usage:
 import argparse
 import gc
 import json
+import os
 import sys
 import uuid as _uuid_mod
 from datetime import datetime
 from pathlib import Path
+
+import wandb
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -29,7 +32,8 @@ from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
 
 try:
-    import wandb
+    WANDB_API_KEY = os.getenv("WANDB_API_KEY")
+    wandb.login(key=WANDB_API_KEY)
     WANDB_OK = True
 except Exception:
     WANDB_OK = False

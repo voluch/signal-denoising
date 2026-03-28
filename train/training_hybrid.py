@@ -21,6 +21,10 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 
 try:
     import wandb
+    import os
+    WANDB_API_KEY = os.getenv("WANDB_API_KEY")
+    if WANDB_API_KEY:
+        wandb.login(key=WANDB_API_KEY)
     WANDB_OK = True
 except Exception:
     WANDB_OK = False

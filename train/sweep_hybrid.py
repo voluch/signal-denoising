@@ -93,6 +93,15 @@ def main():
     else:
         configs_to_run = [int(i) for i in args.configs.split(",")]
 
+    import os
+    try:
+        import wandb
+        WANDB_API_KEY = os.getenv("WANDB_API_KEY")
+        if WANDB_API_KEY:
+            wandb.login(key=WANDB_API_KEY)
+    except Exception:
+        pass
+
     print(f"Dataset  : {dataset_path.name}")
     print(f"Config   : block_size={signal_len}, sample_rate={fs}")
     print(f"Sweep    : {len(configs_to_run)} configurations")
