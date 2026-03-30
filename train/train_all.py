@@ -355,9 +355,14 @@ def main():
           f"batch={args.batch_size}, lr={lr_display}"
           + (f", partial={args.partial_train:.0%}" if args.partial_train < 1.0 else ""))
 
-    run_date = datetime.now().strftime("%Y%m%d")
-    run_uid = _uuid_mod.uuid4().hex[:8]
-    shared_run_dir = dataset_dir / "runs" / f"run_{run_date}_{run_uid}"
+    if args.run_id:
+        shared_run_dir = dataset_dir / "runs" / args.run_id
+    else:
+        run_date = datetime.now().strftime("%Y%m%d")
+        run_uid = _uuid_mod.uuid4().hex[:8]
+        args.run_id = f"run_{run_date}_{run_uid}"
+        shared_run_dir = dataset_dir / "runs" / args.run_id
+
     shared_run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run dir : {shared_run_dir.relative_to(dataset_dir)}")
     args.shared_run_dir = shared_run_dir
