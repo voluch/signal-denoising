@@ -21,6 +21,8 @@ import sys
 import uuid as _uuid_mod
 from datetime import datetime
 from pathlib import Path
+from aws_scripts.download_dataset_from_s3 import download_dataset_from_s3
+from aws_scripts.push_runs_to_s3 import push_runs_to_s3
 
 import wandb
 
@@ -29,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
+
 load_dotenv(ROOT / ".env")
 
 try:
@@ -38,6 +41,7 @@ try:
 except Exception:
     WANDB_OK = False
 
+CLOUD_TRAINING = os.getenv("CLOUD_TRAINING", "False") == "True"
 # Transformer first — largest VRAM consumer (O(T²) attention), trains safely
 # before GPU memory gets fragmented by smaller models.
 ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
@@ -267,7 +271,7 @@ def generate_report(results: list, dataset_dir: Path, args, weights_dir: Path):
                 wname = str(wpath.relative_to(weights_dir))
             except ValueError:
                 wname = wpath.name
-            f.write(f"| {r['model']} ({r.get('noise_type','')}) | {val_str} | {snr_str} | {mse_str} | `{wname}` |\n")
+            f.write(f"| {r['model']} ({r.get('noise_type', '')}) | {val_str} | {snr_str} | {mse_str} | `{wname}` |\n")
 
         # per-SNR table (first model that has it)
         for r in results:
@@ -315,9 +319,23 @@ def main():
     dataset_dir = Path(args.dataset)
     if not dataset_dir.is_absolute():
         dataset_dir = ROOT / dataset_dir
-    if not dataset_dir.exists():
-        print(f"ERROR: dataset not found: {dataset_dir}")
-        sys.exit(1)
+
+    if not dataset_dir.exists() or CLOUD_TRAINING:
+        # Try to download from S3 if it's just a name or relative path that doesn't exist
+        # OR if CLOUD_TRAINING is True (ensure we have the dataset)
+        dataset_name = Path(args.dataset).name
+        # We assume datasets are stored in data_generation/datasets/
+        default_datasets_root = ROOT / "data_generation" / "datasets"
+        potential_dir = default_datasets_root / dataset_name
+
+        if not potential_dir.exists() or CLOUD_TRAINING:
+            if download_dataset_from_s3(dataset_name, potential_dir):
+                dataset_dir = potential_dir
+            elif not potential_dir.exists():
+                print(f"ERROR: dataset not found and failed to download: {dataset_dir}")
+                sys.exit(1)
+        else:
+            dataset_dir = potential_dir
 
     with open(dataset_dir / "dataset_config.json") as f:
         cfg = json.load(f)
@@ -338,7 +356,7 @@ def main():
           + (f", partial={args.partial_train:.0%}" if args.partial_train < 1.0 else ""))
 
     run_date = datetime.now().strftime("%Y%m%d")
-    run_uid  = _uuid_mod.uuid4().hex[:8]
+    run_uid = _uuid_mod.uuid4().hex[:8]
     shared_run_dir = dataset_dir / "runs" / f"run_{run_date}_{run_uid}"
     shared_run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run dir : {shared_run_dir.relative_to(dataset_dir)}")
@@ -383,6 +401,10 @@ def main():
 
     generate_report(results, dataset_dir, args, shared_run_dir)
     print(f"\n✅ Done. Weights and report saved to: {shared_run_dir}")
+
+    if CLOUD_TRAINING:
+        print(f"\n🚀 Cloud Training mode: Pushing results to S3...")
+        push_runs_to_s3(dataset_dir.name, str(shared_run_dir))
 
 
 if __name__ == "__main__":
