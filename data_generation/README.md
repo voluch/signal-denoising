@@ -268,7 +268,7 @@ python data_generation/evaluate_dataset.py --help
 
 ```bash
 # Завантажити конкретний датасет (S3 префікс буде такий же, як назва папки)
-python data_generation/push_to_s3.py data_generation/datasets/fpv_telemetry_...
+python data_generation/push_dataset_to_s3.py data_generation/datasets/fpv_telemetry_...
 ```
 
 Скрипт рекурсивно завантажить усі файли датасету (train, test, config).
