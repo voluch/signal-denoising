@@ -58,6 +58,7 @@ if __name__ == '__main__':
     DATASET_PATH = os.environ['DATASET_PATH']
     WANDB_PROJECT = os.environ['WANDB_PROJECT']
     EXTRA_DOCKER_ARGS = os.environ['EXTRA_DOCKER_ARGS']
+    MODEL = os.environ.get('MODEL', 'all')
     WANDB_API_KEY_SECRET = os.environ.get('RUNPOD_API_KEY_SECRET', '')
     AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
     AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
@@ -66,10 +67,12 @@ if __name__ == '__main__':
 
     print(f"Managing template: {TEMPLATE_NAME}")
 
-    # Build dockerArgs: --dataset <DATASET_PATH> --wandb-project <WANDB_PROJECT> <EXTRA_DOCKER_ARGS>
+    # Build dockerArgs: --dataset <DATASET_PATH> --wandb-project <WANDB_PROJECT> --models <MODEL> <EXTRA_DOCKER_ARGS>
     docker_args = f"--dataset {DATASET_PATH}"
     if WANDB_PROJECT:
         docker_args += f" --wandb-project {WANDB_PROJECT}"
+    if MODEL:
+        docker_args += f" --models {MODEL}"
     if EXTRA_DOCKER_ARGS:
         docker_args += f" {EXTRA_DOCKER_ARGS}"
 
