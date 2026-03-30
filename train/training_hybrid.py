@@ -440,7 +440,7 @@ if __name__ == '__main__':
     p.add_argument('--lambda',        type=float, default=0.01, dest='tikhonov_lambda')
     p.add_argument('--nperseg',       type=int,   default=128)
     p.add_argument('--seed',          type=int,   default=42)
-    p.add_argument('--wandb-project', default='')
+    p.add_argument('--wandb-project', default=os.getenv("WANDB_PROJECT", ""))
     args = p.parse_args()
 
     dataset_path = Path(args.dataset)

@@ -271,7 +271,7 @@ if __name__ == "__main__":
     p.add_argument("--batch-size",    type=int,   default=256)
     p.add_argument("--lr",            type=float, default=1e-4)
     p.add_argument("--seed",          type=int,   default=42)
-    p.add_argument("--wandb-project", default="")
+    p.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", ""))
     args = p.parse_args()
 
     dataset_path = Path(args.dataset)

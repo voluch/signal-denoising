@@ -301,8 +301,8 @@ def parse_args():
                    help="Learning rate override for all models (default: per-model from MODEL_LEARNING_RATES)")
     p.add_argument("--nperseg",       type=int,   default=128,
                    help="STFT window size for spectral models (default 128 for 1024-sample signals)")
-    p.add_argument("--seed",          type=int,   default=42)
-    p.add_argument("--wandb-project", default="",
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", ""),
                    help="W&B project name (empty = disable)")
     p.add_argument("--partial-train", type=float, default=1.0, metavar="FRACTION",
                    help="Fraction of dataset to use (0 < f <= 1). Useful for quick debug runs.")
