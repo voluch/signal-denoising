@@ -97,6 +97,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -120,6 +121,7 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -143,6 +145,7 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -163,6 +166,7 @@ def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -216,6 +220,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -310,6 +315,8 @@ def parse_args():
                    help="W&B project name (empty = disable)")
     p.add_argument("--partial-train", type=float, default=1.0, metavar="FRACTION",
                    help="Fraction of dataset to use (0 < f <= 1). Useful for quick debug runs.")
+    p.add_argument("--run-id", default=None,
+                   help="Optional run ID (e.g. run_20260330_8c4d2660). If not provided, one will be generated.")
     return p.parse_args()
 
 

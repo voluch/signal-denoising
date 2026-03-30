@@ -94,7 +94,8 @@ class UnetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
                  batch_size=512, epochs=30, learning_rate=3e-4,
                  signal_len=256, fs=8192, nperseg=128, noverlap=96, random_state=42,
-                 wandb_project="", device=None, data_fraction=1.0, output_dir=None):
+                 wandb_project="", device=None, data_fraction=1.0, output_dir=None,
+                 run_id: str | None = None):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.batch_size = batch_size
@@ -110,7 +111,7 @@ class UnetAutoencoderTrainer:
         self.output_dir = Path(output_dir) if output_dir is not None else None
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.run_id = uuid.uuid4().hex[:8]
+        self.run_id = run_id or uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
 
@@ -121,6 +122,7 @@ class UnetAutoencoderTrainer:
                 "epochs": epochs, "batch_size": batch_size, "learning_rate": learning_rate,
                 "random_state": random_state, "fs": fs, "nperseg": nperseg,
                 "dataset": self.dataset_path.name,
+                "run_id": self.run_id,
             })
             print(f"[W&B] Logging enabled → project='{wandb_project}', run='{run_name}'")
         else:
