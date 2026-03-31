@@ -1,4 +1,4 @@
-name: CD - Deploy to RunPod
+name: CD - Deploy to RunPod and Train
 
 on:
   workflow_dispatch:
