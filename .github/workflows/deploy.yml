@@ -172,7 +172,7 @@ jobs:
           export IMAGE_URI="${{ steps.image.outputs.image_uri }}"
           export REGISTRY_ID="${{ steps.registry.outputs.registry_id }}"
           export VOLUME_SIZE_GB=${{ env.VOLUME_SIZE_GB }}
-          export VOLUME_MOUTH_PATH="${{ env.VOLUME_MOUTH_PATH }}"
+          export VOLUME_MOUNT_PATH="${{ env.VOLUME_MOUNT_PATH }}"
           export DATASET_PATH="${{ inputs.dataset_path }}"
           export WANDB_PROJECT="${{ inputs.wandb_project }}"
           export EXTRA_DOCKER_ARGS="${{ inputs.extra_docker_args }}"
