@@ -21,14 +21,15 @@ import sys
 import uuid as _uuid_mod
 from datetime import datetime
 from pathlib import Path
-from aws_scripts.download_dataset_from_s3 import download_dataset_from_s3
-from aws_scripts.push_runs_to_s3 import push_runs_to_s3
-
-import wandb
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from aws_scripts.download_dataset_from_s3 import download_dataset_from_s3
+from aws_scripts.push_runs_to_s3 import push_runs_to_s3
+
+import wandb
 
 from dotenv import load_dotenv
 
