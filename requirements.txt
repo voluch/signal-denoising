@@ -36,6 +36,7 @@ triton==3.2.0
 tqdm==4.67.3
 typing_extensions==4.12.2
 urllib3<2.4
+requests>=2.31.0
 python-dotenv==1.0.1
 wandb==0.19.11
 boto3==1.42.78
