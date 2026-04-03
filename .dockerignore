@@ -1,4 +1,5 @@
 .git
+!.github/scripts/terminate_pod.py
 .github
 .idea
 .venv
