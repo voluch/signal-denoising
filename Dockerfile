@@ -4,7 +4,7 @@ FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (for matplotlib and other potential libraries)
+# Install system dependencies and clean up apt cache in one layer to reduce size
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \
@@ -13,10 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy only requirements.txt first to leverage Docker cache
 COPY requirements.txt .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies and clean up pip cache
+RUN pip install --no-cache-dir -r requirements.txt && \
+    rm -rf /root/.cache/pip
 
-# Copy the rest of the project
+# Copy the rest of the project (uses .dockerignore to skip unnecessary files)
 COPY . .
 
 # Default command to run the training script.
