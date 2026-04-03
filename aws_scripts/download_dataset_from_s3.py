@@ -47,6 +47,10 @@ def download_dataset_from_s3(dataset_name: str, target_dir: Path):
 
         target_dir.mkdir(parents=True, exist_ok=True)
         for obj in objs:
+            # Skip runs folder in the requested dataset
+            if f"{dataset_name}/runs/" in obj.key:
+                continue
+
             # Create local path
             local_file_path = target_dir.parent / obj.key
             local_file_path.parent.mkdir(parents=True, exist_ok=True)
