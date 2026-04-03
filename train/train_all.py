@@ -418,6 +418,15 @@ def main():
     if CLOUD_TRAINING:
         print(f"\n🚀 Cloud Training mode: Pushing results to S3...")
         push_runs_to_s3(dataset_dir.name, str(shared_run_dir))
+        
+        print(f"Terminating pod as training is finished...")
+        # Run termination script via subprocess for robustness
+        import subprocess
+        script_path = ROOT / ".github/scripts/terminate_pod.py"
+        if script_path.exists():
+            subprocess.run([sys.executable, str(script_path)], check=False)
+        else:
+            print(f"Warning: Termination script not found at {script_path}")
 
 
 if __name__ == "__main__":
