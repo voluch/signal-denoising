@@ -37,9 +37,13 @@ load_dotenv(ROOT / ".env")
 
 try:
     WANDB_API_KEY = os.getenv("WANDB_API_KEY")
-    wandb.login(key=WANDB_API_KEY)
-    WANDB_OK = True
-except Exception:
+    if WANDB_API_KEY:
+        wandb.login(key=WANDB_API_KEY)
+        WANDB_OK = True
+    else:
+        WANDB_OK = False
+except Exception as e:
+    print(f"Warning: W&B login failed: {e}")
     WANDB_OK = False
 
 CLOUD_TRAINING = os.getenv("CLOUD_TRAINING", "False") == "True"
@@ -376,7 +380,7 @@ def main():
     args.shared_run_dir = shared_run_dir
 
     if not args.wandb_project:
-        reason = "wandb not installed" if not WANDB_OK else "no --wandb-project given"
+        reason = "WANDB_API_KEY not set" if not WANDB_OK else "no --wandb-project given"
         print(f"[W&B] Logging disabled ({reason})")
     else:
         print(f"[W&B] Logging enabled → project='{args.wandb_project}' (one run per model)")
