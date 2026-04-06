@@ -60,7 +60,8 @@ if __name__ == '__main__':
     EXTRA_DOCKER_ARGS = os.environ['EXTRA_DOCKER_ARGS']
     MODEL = os.environ.get('MODEL', 'all')
     RUN_ID = os.environ.get('RUN_ID', '')
-    WANDB_API_KEY_SECRET = os.environ.get('RUNPOD_API_KEY_SECRET', '')
+    WANDB_API_KEY = os.environ.get('WANDB_API_KEY', '')
+    RUNPOD_API_KEY_SECRET = os.environ.get('RUNPOD_API_KEY', '')
     AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
     AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
     S3_BUCKET = os.environ.get('S3_BUCKET', '')
@@ -109,11 +110,10 @@ if __name__ == '__main__':
         {"key": "PYTHONUNBUFFERED", "value": "1"},
         {"key": "CLOUD_TRAINING", "value": "True"},
     ]
-    if WANDB_API_KEY_SECRET:
-        base_env_vars.append({"key": "WANDB_API_KEY", "value": WANDB_API_KEY_SECRET})
-    if not any(v["key"] == "RUNPOD_API_KEY" for v in base_env_vars) and WANDB_API_KEY_SECRET:
-        # Also provide it as RUNPOD_API_KEY for the termination script if not already there
-        base_env_vars.append({"key": "RUNPOD_API_KEY", "value": WANDB_API_KEY_SECRET})
+    if WANDB_API_KEY:
+        base_env_vars.append({"key": "WANDB_API_KEY", "value": WANDB_API_KEY})
+    if RUNPOD_API_KEY_SECRET:
+        base_env_vars.append({"key": "RUNPOD_API_KEY", "value": RUNPOD_API_KEY_SECRET})
     if AWS_ACCESS_KEY_ID:
         base_env_vars.append({"key": "AWS_ACCESS_KEY_ID", "value": AWS_ACCESS_KEY_ID})
     if AWS_SECRET_ACCESS_KEY:
