@@ -1,6 +1,5 @@
 .git
-!.github/scripts/terminate_pod.py
-.github
+# We need terminate_pod.py for cloud training cleanup
 .idea
 .venv
 __pycache__
