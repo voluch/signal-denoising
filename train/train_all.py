@@ -78,6 +78,26 @@ MODEL_LEARNING_RATES = {
     "wavelet":     None,  # not applicable (grid search)
 }
 
+# Allow overriding via environment variables (e.g., from RunPod/GitHub Action)
+# Expects JSON string: MODEL_BATCH_SIZES='{"unet": 512, "vae": 1024}'
+env_batch_sizes = os.getenv("MODEL_BATCH_SIZES")
+if env_batch_sizes:
+    try:
+        overrides = json.loads(env_batch_sizes)
+        MODEL_BATCH_SIZES.update(overrides)
+        print(f"INFO: Overriding MODEL_BATCH_SIZES from env: {overrides}")
+    except Exception as e:
+        print(f"Warning: Failed to parse MODEL_BATCH_SIZES env var: {e}")
+
+env_lrs = os.getenv("MODEL_LEARNING_RATES")
+if env_lrs:
+    try:
+        overrides = json.loads(env_lrs)
+        MODEL_LEARNING_RATES.update(overrides)
+        print(f"INFO: Overriding MODEL_LEARNING_RATES from env: {overrides}")
+    except Exception as e:
+        print(f"Warning: Failed to parse MODEL_LEARNING_RATES env var: {e}")
+
 
 # ── model runners ─────────────────────────────────────────────────────────────
 

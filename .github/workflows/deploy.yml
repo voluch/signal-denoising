@@ -53,6 +53,8 @@ on:
           Extra environment variables (KEY=VALUE pairs) to pass to the Pod runtime
           Format: space-separated, comma-separated, or one per line
           Example: DEBUG=true LOG_LEVEL=info
+          Use json string format if you need to pass complex values (e.g., JSON objects)
+          Example: EXTRA_ENVS='{"key1": "value1", "key2": "value2"}'
         required: false
         type: string
         default: ''
