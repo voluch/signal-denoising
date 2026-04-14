@@ -254,6 +254,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Run ID** | \`${{ steps.run_id.outputs.run_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Pod ID** | \`${{ steps.pod.outputs.pod_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Pod URL** | [${{ steps.pod.outputs.pod_url }}](${{ steps.pod.outputs.pod_url }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Template** | \`${{ steps.template.outputs.template_id }}\` |" >> $GITHUB_STEP_SUMMARY
@@ -271,6 +272,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Pod \`${{ env.POD_NAME }}\` already exists." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Pod URL:** ${{ steps.pod.outputs.pod_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Run ID (New)** | \`${{ steps.run_id.outputs.run_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Pod URL** | [${{ steps.pod.outputs.pod_url }}](${{ steps.pod.outputs.pod_url }}) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "To replace, run with 'Replace existing pod' checked." >> $GITHUB_STEP_SUMMARY
