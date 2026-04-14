@@ -1,13 +1,6 @@
 name: CI - Build and Push to ECR
 
 on:
-  push:
-    branches:
-      - main
-      - containerize-training
-    paths-ignore:
-        - README.md
-        - .github/**
   workflow_dispatch:  # Manual trigger
 
 env:
