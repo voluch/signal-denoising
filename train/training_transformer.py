@@ -20,11 +20,8 @@ from torch.utils.data import DataLoader, TensorDataset, random_split
 try:
     import wandb
     import os
-    WANDB_API_KEY = os.getenv("WANDB_API_KEY")
-    if WANDB_API_KEY:
-        wandb.login(key=WANDB_API_KEY)
     WANDB_OK = True
-except Exception:
+except ImportError:
     WANDB_OK = False
 
 from tqdm import tqdm
@@ -60,6 +57,12 @@ class TransformerTrainer:
         torch.manual_seed(self.random_state)
 
         if WANDB_OK and wandb_project:
+            # Login if not already logged in
+            if not wandb.api.api_key:
+                api_key = os.getenv("WANDB_API_KEY")
+                if api_key:
+                    wandb.login(key=api_key)
+
             run_name = f"{MODEL_NAME}_{noise_type}_{self.dataset_uid}_{self.run_id}"
             wandb.init(project=wandb_project, name=run_name, reinit=True, config={
                 "model": MODEL_NAME, "noise_type": noise_type,
