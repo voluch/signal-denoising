@@ -57,6 +57,7 @@ Whenever you make changes to the training scripts or models, you need to update 
 
 You can trigger a training run using the **"CD - Deploy to RunPod and Train"** GitHub Action. This action automates pod creation, template setup, and training initiation.
 
+At first check available GPU machines on [runpod](https://console.runpod.io/deploy). Don't forget to filter for GPU instances in EU and North America. 
 ### Action Inputs & Parameters:
 
 - **GPU Type**: Choose the desired GPU (e.g., `NVIDIA RTX A5000` or `NVIDIA GeForce RTX 4090`).
@@ -73,7 +74,7 @@ You can trigger a training run using the **"CD - Deploy to RunPod and Train"** G
 After dispatching, check the **Job Summary** in GitHub Actions. It will display:
 - **Run ID**: The unique ID for this training session.
 - **Pod URL**: A link to monitor the pod on RunPod (if applicable).
-- **Run ID (New)**: If a pod was already running, it shows the new Run ID assigned to it.
+- **Run ID**: If a pod was already running, it shows the new Run ID assigned to it.
 
 ## 5. Check Online Results (W&B)
 
