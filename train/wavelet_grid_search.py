@@ -115,6 +115,7 @@ if __name__ == "__main__":
     p.add_argument("--seed",       type=int, default=42)
     p.add_argument("--plot",       action="store_true",
                    help="Plot an example denoising result")
+    p.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", ""))
     args = p.parse_args()
 
     dataset_path = Path(args.dataset)

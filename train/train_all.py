@@ -16,6 +16,7 @@ Usage:
 import argparse
 import gc
 import json
+import os
 import sys
 import uuid as _uuid_mod
 from datetime import datetime
@@ -25,15 +26,27 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from aws_scripts.download_dataset_from_s3 import download_dataset_from_s3
+from aws_scripts.push_runs_to_s3 import push_runs_to_s3
+
+import wandb
+
 from dotenv import load_dotenv
+
 load_dotenv(ROOT / ".env")
 
 try:
-    import wandb
-    WANDB_OK = True
-except Exception:
+    WANDB_API_KEY = os.getenv("WANDB_API_KEY")
+    if WANDB_API_KEY:
+        wandb.login(key=WANDB_API_KEY)
+        WANDB_OK = True
+    else:
+        WANDB_OK = False
+except Exception as e:
+    print(f"Warning: W&B login failed: {e}")
     WANDB_OK = False
 
+CLOUD_TRAINING = os.getenv("CLOUD_TRAINING", "False") == "True"
 # Transformer first — largest VRAM consumer (O(T²) attention), trains safely
 # before GPU memory gets fragmented by smaller models.
 ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
@@ -65,6 +78,26 @@ MODEL_LEARNING_RATES = {
     "wavelet":     None,  # not applicable (grid search)
 }
 
+# Allow overriding via environment variables (e.g., from RunPod/GitHub Action)
+# Expects JSON string: MODEL_BATCH_SIZES='{"unet": 512, "vae": 1024}'
+env_batch_sizes = os.getenv("MODEL_BATCH_SIZES")
+if env_batch_sizes:
+    try:
+        overrides = json.loads(env_batch_sizes)
+        MODEL_BATCH_SIZES.update(overrides)
+        print(f"INFO: Overriding MODEL_BATCH_SIZES from env: {overrides}")
+    except Exception as e:
+        print(f"Warning: Failed to parse MODEL_BATCH_SIZES env var: {e}")
+
+env_lrs = os.getenv("MODEL_LEARNING_RATES")
+if env_lrs:
+    try:
+        overrides = json.loads(env_lrs)
+        MODEL_LEARNING_RATES.update(overrides)
+        print(f"INFO: Overriding MODEL_LEARNING_RATES from env: {overrides}")
+    except Exception as e:
+        print(f"Warning: Failed to parse MODEL_LEARNING_RATES env var: {e}")
+
 
 # ── model runners ─────────────────────────────────────────────────────────────
 
@@ -89,6 +122,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -112,6 +146,7 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -135,6 +170,7 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -155,6 +191,7 @@ def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -208,6 +245,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
         wandb_project=args.wandb_project,
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
+        run_id=args.run_id,
     ).train()
 
 
@@ -263,7 +301,7 @@ def generate_report(results: list, dataset_dir: Path, args, weights_dir: Path):
                 wname = str(wpath.relative_to(weights_dir))
             except ValueError:
                 wname = wpath.name
-            f.write(f"| {r['model']} ({r.get('noise_type','')}) | {val_str} | {snr_str} | {mse_str} | `{wname}` |\n")
+            f.write(f"| {r['model']} ({r.get('noise_type', '')}) | {val_str} | {snr_str} | {mse_str} | `{wname}` |\n")
 
         # per-SNR table (first model that has it)
         for r in results:
@@ -297,11 +335,13 @@ def parse_args():
                    help="Learning rate override for all models (default: per-model from MODEL_LEARNING_RATES)")
     p.add_argument("--nperseg",       type=int,   default=128,
                    help="STFT window size for spectral models (default 128 for 1024-sample signals)")
-    p.add_argument("--seed",          type=int,   default=42)
-    p.add_argument("--wandb-project", default="",
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", "signal-denoising-v2"),
                    help="W&B project name (empty = disable)")
     p.add_argument("--partial-train", type=float, default=1.0, metavar="FRACTION",
                    help="Fraction of dataset to use (0 < f <= 1). Useful for quick debug runs.")
+    p.add_argument("--run-id", default=None,
+                   help="Optional run ID (e.g. run_20260330_8c4d2660). If not provided, one will be generated.")
     return p.parse_args()
 
 
@@ -311,9 +351,23 @@ def main():
     dataset_dir = Path(args.dataset)
     if not dataset_dir.is_absolute():
         dataset_dir = ROOT / dataset_dir
-    if not dataset_dir.exists():
-        print(f"ERROR: dataset not found: {dataset_dir}")
-        sys.exit(1)
+
+    if not dataset_dir.exists() or CLOUD_TRAINING:
+        # Try to download from S3 if it's just a name or relative path that doesn't exist
+        # OR if CLOUD_TRAINING is True (ensure we have the dataset)
+        dataset_name = Path(args.dataset).name
+        # We assume datasets are stored in data_generation/datasets/
+        default_datasets_root = ROOT / "data_generation" / "datasets"
+        potential_dir = default_datasets_root / dataset_name
+
+        if not potential_dir.exists() or CLOUD_TRAINING:
+            if download_dataset_from_s3(dataset_name, potential_dir):
+                dataset_dir = potential_dir
+            elif not potential_dir.exists():
+                print(f"ERROR: dataset not found and failed to download: {dataset_dir}")
+                sys.exit(1)
+        else:
+            dataset_dir = potential_dir
 
     with open(dataset_dir / "dataset_config.json") as f:
         cfg = json.load(f)
@@ -333,15 +387,20 @@ def main():
           f"batch={args.batch_size}, lr={lr_display}"
           + (f", partial={args.partial_train:.0%}" if args.partial_train < 1.0 else ""))
 
-    run_date = datetime.now().strftime("%Y%m%d")
-    run_uid  = _uuid_mod.uuid4().hex[:8]
-    shared_run_dir = dataset_dir / "runs" / f"run_{run_date}_{run_uid}"
+    if args.run_id:
+        shared_run_dir = dataset_dir / "runs" / args.run_id
+    else:
+        run_date = datetime.now().strftime("%Y%m%d")
+        run_uid = _uuid_mod.uuid4().hex[:8]
+        args.run_id = f"run_{run_date}_{run_uid}"
+        shared_run_dir = dataset_dir / "runs" / args.run_id
+
     shared_run_dir.mkdir(parents=True, exist_ok=True)
     print(f"Run dir : {shared_run_dir.relative_to(dataset_dir)}")
     args.shared_run_dir = shared_run_dir
 
     if not args.wandb_project:
-        reason = "wandb not installed" if not WANDB_OK else "no --wandb-project given"
+        reason = "WANDB_API_KEY not set" if not WANDB_OK else "no --wandb-project given"
         print(f"[W&B] Logging disabled ({reason})")
     else:
         print(f"[W&B] Logging enabled → project='{args.wandb_project}' (one run per model)")
@@ -379,6 +438,19 @@ def main():
 
     generate_report(results, dataset_dir, args, shared_run_dir)
     print(f"\n✅ Done. Weights and report saved to: {shared_run_dir}")
+
+    if CLOUD_TRAINING:
+        print(f"\n🚀 Cloud Training mode: Pushing results to S3...")
+        push_runs_to_s3(dataset_dir.name, str(shared_run_dir))
+        
+        print(f"Terminating pod as training is finished...")
+        # Run termination script via subprocess for robustness
+        import subprocess
+        script_path = ROOT / ".github/scripts/terminate_pod.py"
+        if script_path.exists():
+            subprocess.run([sys.executable, str(script_path)], check=False)
+        else:
+            print(f"Warning: Termination script not found at {script_path}")
 
 
 if __name__ == "__main__":
