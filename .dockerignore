@@ -1,0 +1,13 @@
+.git
+# We need terminate_pod.py for cloud training cleanup
+.idea
+.venv
+__pycache__
+wandb
+data_generation/datasets/
+spectro_dataset
+weights
+.env
+.env.template
+*.ipynb
+*.md

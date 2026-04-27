@@ -66,13 +66,16 @@ SDR-приймач видає комплексний I/Q-сигнал (in-phase 
 |---|---|---|
 | Прототип | Voyager, CubeSat, Mars rovers | ELRS, Crossfire, Bluetooth |
 | Модуляції | BPSK, QPSK | QPSK, CPFSK, GFSK |
-| Несуча (baseband) | 100-800 Hz | 300-1000 Hz |
+| Несуча (baseband) | 100-600 Hz | 200-1000 Hz |
 | SNR (train) | -20..0 дБ | -5..+15 дБ |
-| SNR-точки (test) | -20, -15, -12, -10, -7, -5, 0 дБ | -5, 0, 3, 5, 8, 10, 15 дБ |
+| SNR-точки (test) | -20, -17, -15, -12, -10, -7, -5, -3, 0, 3 дБ | -5, -2, 0, 3, 5, 8, 10, 12, 15, 18 дБ |
+
+**FPV telemetry** (дефолт) відповідає реалістичним умовам FPV-зв'язку:
+помірний SNR, QPSK-модуляція, polygaussian noise. Це найближче до умов
+реального приймача і дає моделям достатньо інформативний сигнал для навчання.
 
 **Deep space** відповідає умовам надслабкого сигналу: при -20 дБ потужність шуму
-в 100 разів перевищує потужність корисного сигналу. Саме в такому режимі
-різниця між методами денойзингу має найбільше практичне значення.
+в 100 разів перевищує потужність корисного сигналу.
 
 ---
 
@@ -124,32 +127,19 @@ Polygaussian noise моделює ситуацію, де в ефірі одно�
 | Тип | Спектр | Фізичний прототип |
 |---|---|---|
 | `polygauss` | Рівний | Кілька одночасних джерел завад зі стабільними характеристиками |
-| `polygauss_nonstationary` | Рівний, нестаціонарний | Мінливе радіосередовище: баланс між джерелами завад змінюється з часом |
 | `impulse` | Широкосмуговий | EM-спалахи, перешкоди від силової електроніки |
 | `pink` | 1/f | Флікер-шум підсилювачів |
 | `red` | 1/f² | Броунівський шум, низькочастотні завади |
 
-### Polygaussian noise - детальніше
+### Polygaussian noise — детальніше
 
-**Стаціонарний (`polygauss`):** суміш K гауссіан з фіксованими (але випадково
+**Стаціонарний (`polygauss`, дефолт):** суміш K гауссіан з фіксованими (але випадково
 обраними на початку генерації) вагами, середніми та дисперсіями.
 Параметри не змінюються впродовж одного блоку сигналу.
 
-**Нестаціонарний (`polygauss_nonstationary`):** суміш K гауссіан,
-параметри якої **плавно дрейфують у часі** через процеси Орнштейна-Уленбека (OU):
-
-- **Ваги** w_k(t): K траєкторій OU -> softmax, Σw_k = 1
-- **Дисперсії** σ_k(t): K траєкторій OU у log-просторі -> exp > 0;
-  log-зміщення рівномірно розподілені від -0.5 до +0.5 (σ ≈ 0.6...1.6),
-  що дозволяє охоплювати як лептокуртичні (важкі хвости), так і платикуртичні (від'ємний ексцес) режими
-- **Середні** μ_k(t): K-1 вільних траєкторій OU; остання визначається з умови
-  нульового загального середнього: `μ_K(t) = -Σ_{k<K} w_k(t)*μ_k(t) / w_K(t)`
-
-Час кореляції процесу OU: τ = 1/θ секунд. Це моделює реальне мінливе
-радіосередовище: завади від сонячного вітру, руху супутника відносно джерела перешкод тощо.
-
-**K** (`polygauss_components`, дефолт 3) - кількість компонент GMM.
-Можна зафіксувати або задати діапазон для рандомізації per-sample.
+**K** (`polygauss_components`, дефолт 3) — кількість компонент GMM.
+Можна зафіксувати або задати діапазон для рандомізації per-sample
+через `--polygauss_random_k`.
 
 ---
 
@@ -159,15 +149,15 @@ Polygaussian noise моделює ситуацію, де в ефірі одно�
 |---|---|---|
 | `num_samples` | (required) | Кількість прикладів у тренувальному наборі |
 | `sample_rate` | 8192 | Частота дискретизації [Гц] |
-| `block_size` | 256 | Кількість семплів на приклад; латентність = block_size / sample_rate |
-| `scenario` | `deep_space` | Профіль сценарію |
-| `modulation_type` | `bpsk` | Тип модуляції; `"random"` - вибір per-signal зі списку сценарію |
-| `bits_per_symbol` | 1 | log₂(M): розмір алфавіту M = 2^bps |
+| `block_size` | 1024 | Кількість семплів на приклад; латентність = block_size / sample_rate |
+| `scenario` | `fpv_telemetry` | Профіль сценарію |
+| `modulation_type` | `qpsk` | Тип модуляції; `"random"` — вибір per-signal зі списку сценарію |
+| `bits_per_symbol` | 2 | log₂(M): розмір алфавіту M = 2^bps |
 | `snr_range` | з сценарію | (min_dB, max_dB), перекриває дефолт сценарію |
-| `non_gaussian_noise_types` | `["polygauss_nonstationary"]` | Список типів негауссового шуму |
+| `non_gaussian_noise_types` | `["polygauss"]` | Список типів негауссового шуму |
 | `non_gaussian_mix_mode` | `"fixed"` | `"fixed"` = всі типи разом; `"random"` = випадкова підмножина per-sample |
 | `polygauss_components` | 3 | Фіксована кількість компонент GMM |
-| `polygauss_random_k` | `None` | `(k_min, k_max)` - рандомізувати K per-sample |
+| `polygauss_random_k` | `None` | `(k_min, k_max)` — рандомізувати K per-sample |
 
 ### Масштабування шуму до SNR
 
@@ -185,14 +175,20 @@ Polygaussian noise моделює ситуацію, де в ефірі одно�
 ## Генерація
 
 ```bash
-# Дефолт: deep_space, polygauss_nonstationary, bpsk, 50 000 прикладів
+# Дефолт: fpv_telemetry, polygauss, qpsk (bps=2), 400 000 прикладів
 python data_generation/generation.py
 
-# З явними параметрами
-python data_generation/generation.py --deep_space --polygauss_nonstationary --modulation_type bpsk
-
-# FPV-сценарій з GFSK, 4-FSK (bps=2)
+# FPV-сценарій з GFSK
 python data_generation/generation.py --fpv --polygauss --modulation_type gfsk --bits_per_symbol 2
+
+# Deep space сценарій
+python data_generation/generation.py --deep_space --polygauss --modulation_type qpsk
+
+# Polygauss + impulse (fixed combination)
+python data_generation/generation.py --polygauss_impulse
+
+# Всі типи негауссового шуму (random subset per sample)
+python data_generation/generation.py --all_noise
 
 # Малий датасет для швидкої перевірки
 python data_generation/generation.py --num_train 1000 --samples_per_snr 100
@@ -208,20 +204,20 @@ python data_generation/generation.py --help
 
 ```
 data_generation/datasets/
-└── deep_space_polygauss_nonstationary_bpsk_bs256_n50000_6d07aecc/
+└── fpv_telemetry_polygauss_qpsk_bs1024_n400000_6d07aecc/
     ├── dataset_config.json    <- всі параметри генерації + uid + timestamp
     ├── train/
-    │   ├── clean_signals.npy                (50 000 x 256)  float32
-    │   ├── gaussian_signals.npy             (50 000 x 256)  float32
-    │   ├── non_gaussian_signals.npy         (50 000 x 256)  float32
-    │   ├── non_gaussian_noise_only.npy      (50 000 x 256)  float32
-    │   └── snr_values.npy                   (50 000,)        float32
+    │   ├── clean_signals.npy                (400 000 x 1024)  float32
+    │   ├── gaussian_signals.npy             (400 000 x 1024)  float32
+    │   ├── non_gaussian_signals.npy         (400 000 x 1024)  float32
+    │   ├── non_gaussian_noise_only.npy      (400 000 x 1024)  float32
+    │   └── snr_values.npy                   (400 000,)        float32
     └── test/
-        ├── test_m20dB_clean.npy                      (500 x 256)
-        ├── test_m20dB_gaussian.npy                   (500 x 256)
-        ├── test_m20dB_non_gaussian.npy               (500 x 256)
-        ├── test_m20dB_non_gaussian_noise_only.npy    (500 x 256)
-        └── ...  <- 7 SNR-точок x 4 типи = 28 файлів
+        ├── test_m05dB_clean.npy                       (10 000 x 1024)
+        ├── test_m05dB_gaussian.npy                    (10 000 x 1024)
+        ├── test_m05dB_non_gaussian.npy                (10 000 x 1024)
+        ├── test_m05dB_non_gaussian_noise_only.npy     (10 000 x 1024)
+        └── ...  <- 10 SNR-точок x 4 типи = 40 файлів
 ```
 
 > `data_generation/datasets/` додана до `.gitignore`.
@@ -234,11 +230,11 @@ data_generation/datasets/
 
 ```bash
 python data_generation/evaluate_dataset.py \
-    data_generation/datasets/deep_space_polygauss_nonstationary_bpsk_bs256_n50000_6d07aecc/
+    data_generation/datasets/fpv_telemetry_polygauss_qpsk_bs1024_n400000_6d07aecc/
 
 # З вищим порядком кумулянтів
 python data_generation/evaluate_dataset.py \
-    data_generation/datasets/deep_space_polygauss_nonstationary_bpsk_bs256_n50000_6d07aecc/ \
+    data_generation/datasets/fpv_telemetry_polygauss_qpsk_bs1024_n400000_6d07aecc/ \
     --max_order 6
 
 # Довідка
@@ -247,6 +243,37 @@ python data_generation/evaluate_dataset.py --help
 
 Скрипт читає `dataset_config.json`, автоматично встановлює `window_size = block_size`
 і зберігає результати у `<run_folder>/dataset_evaluation/`.
+
+---
+
+## Завантаження датасету в S3
+
+Для хмарного тренування згенерований датасет потрібно завантажити в S3.
+Для цього використовуйте скрипт `data_generation/push_to_s3.py`.
+
+### Налаштування
+
+1. Переконайтеся, що у вас заповнені AWS-ключі у файлі `.env` (в корені проекту):
+   ```bash
+   AWS_ACCESS_KEY=...
+   AWS_SECRET_ACCESS_KEY=...
+   S3_BUCKET=signal-denoising-datasets
+   ```
+2. Встановіть залежності:
+   ```bash
+   pip install boto3 python-dotenv
+   ```
+
+### Використання
+
+```bash
+# Завантажити конкретний датасет (S3 префікс буде такий же, як назва папки)
+python data_generation/push_dataset_to_s3.py data_generation/datasets/fpv_telemetry_...
+```
+
+Скрипт рекурсивно завантажить усі файли датасету (train, test, config).
+
+---
 
 ### Логіка оцінки
 
@@ -263,13 +290,12 @@ python data_generation/evaluate_dataset.py --help
 | κ₃, κ₄ | ~50-100 семплів |
 | κ₅, κ₆ | ~150-300 семплів |
 
-При `block_size=256`: κ₃..κ₄ надійні, κ₅..κ₆ на межі.
-Для вищих порядків збільшуйте `block_size` при генерації.
+При `block_size=1024`: всі порядки κ₃..κ₆ надійні.
 
 ### Графіки
 
 Всі графіки зберігаються у `<run_folder>/dataset_evaluation/`.
-Нижче наведені приклади для датасету `deep_space / polygauss / bpsk`.
+Нижче наведені приклади для датасету `deep_space / polygauss / qpsk`.
 
 **S-K Coverage:** частка клітинок допустимої області (γ₄ >= γ₃² - 2)
 у сітці 20x20, які містять хоча б один приклад. Поріг 70% - PASS.
@@ -340,9 +366,7 @@ python data_generation/evaluate_dataset.py --help
 Панелі зверху вниз: γ₃(t), γ₄(t), ..., γₙ(t) і σ²(t).
 
 Горизонтальні рівні лінії - стаціонарний процес, параметри шуму не змінюються.
-Виражений дрейф - нестаціонарний шум: характеристики плавно еволюціонують
-впродовж одного блоку. Для `polygauss_nonstationary` очікується
-помітний дрейф; для `polygauss` лінії мають бути відносно рівними.
+Для `polygauss` лінії мають бути відносно рівними (стаціонарний шум).
 
 ### Аргументи `evaluate_dataset.py`
 
