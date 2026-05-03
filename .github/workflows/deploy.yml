@@ -37,7 +37,7 @@ on:
         default: '150'
 
       replace_existing_pod:
-        description: 'Replace existing pod (terminate old pod before deploying new one)'
+        description: 'Replace existing pod (terminate old pod before deploying new one). If false and a pod already exists, a new parallel pod is deployed with a versioned name (e.g. signal-denoising-train-2).'
         required: false
         type: boolean
         default: true
