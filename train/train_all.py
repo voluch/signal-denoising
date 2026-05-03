@@ -22,6 +22,9 @@ import uuid as _uuid_mod
 from datetime import datetime
 from pathlib import Path
 
+# Allow MPS to fall back to CPU for unsupported ops (e.g. complex tensor operations).
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -50,6 +53,8 @@ CLOUD_TRAINING = os.getenv("CLOUD_TRAINING", "False") == "True"
 # Transformer first — largest VRAM consumer (O(T²) attention), trains safely
 # before GPU memory gets fragmented by smaller models.
 ALL_MODELS = ["transformer", "unet", "vae", "resnet", "hybrid", "wavelet"]
+from train.device_utils import get_device, empty_cache, get_batch_size_multiplier
+
 
 # Per-model batch sizes measured on ~8 GiB GPU with signal_len=1024, nperseg=128.
 # Values calibrated from actual vram= logs; target ≤ 6.5 GiB peak (fwd+bwd).
@@ -89,6 +94,28 @@ if env_batch_sizes:
     except Exception as e:
         print(f"Warning: Failed to parse MODEL_BATCH_SIZES env var: {e}")
 
+def _resolve_batch_size(args, model_key: str) -> int:
+    """Return explicit --batch-size if given, else default × device multiplier."""
+    if args.batch_size is not None:
+        return args.batch_size
+    env_batch_sizes = os.getenv("MODEL_BATCH_SIZES")
+    if env_batch_sizes:
+        try:
+            overrides = json.loads(env_batch_sizes)
+            MODEL_BATCH_SIZES.update(overrides)
+            print(f"INFO: Overriding MODEL_BATCH_SIZES from env: {overrides}")
+            return MODEL_BATCH_SIZES.get(model_key, 4)
+        except Exception as e:
+            print(f"Warning: Failed to parse MODEL_BATCH_SIZES env var: {e}")
+    else:
+        base = MODEL_BATCH_SIZES[model_key]
+        mult = getattr(args, '_bs_mult', 1.0)
+        # Transformer has O(T²) memory in attention — don't scale batch with device multiplier.
+        if model_key == "transformer":
+            mult = 1.0
+        return int(base * mult)
+
+
 env_lrs = os.getenv("MODEL_LEARNING_RATES")
 if env_lrs:
     try:
@@ -106,7 +133,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== UNet (Mask + STFT, MSELoss) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["unet"]
+    bs = _resolve_batch_size(args, "unet")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["unet"]
     return UnetAutoencoderTrainer(
         dataset_path=dataset_dir,
@@ -123,6 +150,7 @@ def run_unet(dataset_dir: Path, cfg: dict, args) -> dict:
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
         run_id=args.run_id,
+        device=args.device,
     ).train()
 
 
@@ -131,7 +159,7 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== ResNet (STFT autoencoder, MSELoss) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["resnet"]
+    bs = _resolve_batch_size(args, "resnet")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["resnet"]
     return ResNetAutoencoderTrainer(
         dataset_path=dataset_dir,
@@ -147,6 +175,7 @@ def run_resnet(dataset_dir: Path, cfg: dict, args) -> dict:
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
         run_id=args.run_id,
+        device=args.device,
     ).train()
 
 
@@ -155,7 +184,7 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== VAE (SpectrogramVAE, MSELoss + KL) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["vae"]
+    bs = _resolve_batch_size(args, "vae")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["vae"]
     return VAETrainer(
         dataset_path=dataset_dir,
@@ -171,6 +200,7 @@ def run_vae(dataset_dir: Path, cfg: dict, args) -> dict:
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
         run_id=args.run_id,
+        device=args.device,
     ).train()
 
 
@@ -179,7 +209,7 @@ def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
     print("\n" + "=" * 60)
     print("=== Transformer (time-domain, MSELoss) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["transformer"]
+    bs = _resolve_batch_size(args, "transformer")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["transformer"]
     return TransformerTrainer(
         dataset_path=dataset_dir,
@@ -192,6 +222,7 @@ def run_transformer(dataset_dir: Path, cfg: dict, args) -> dict:
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
         run_id=args.run_id,
+        device=args.device,
     ).train()
 
 
@@ -224,16 +255,20 @@ def run_wavelet(dataset_dir: Path, cfg: dict, args) -> dict | None:
 
 def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
     from train.training_hybrid import HybridUnetTrainer
+    dsge_variant = getattr(args, 'dsge_variant', 'A')
+    dsge_basis = getattr(args, 'dsge_basis', 'robust')
+    dsge_order = getattr(args, 'dsge_order', 3)
     print("\n" + "=" * 60)
-    print("=== HybridDSGE_UNet (robust basis S=3, U-Net mask, MSELoss) ===")
+    print(f"=== HybridDSGE_UNet ({dsge_basis} S={dsge_order} v{dsge_variant}, MSELoss) ===")
     print("=" * 60)
-    bs = args.batch_size if args.batch_size is not None else MODEL_BATCH_SIZES["hybrid"]
+    bs = _resolve_batch_size(args, "hybrid")
     lr = args.lr if args.lr is not None else MODEL_LEARNING_RATES["hybrid"]
     return HybridUnetTrainer(
         dataset_path=dataset_dir,
         noise_type=args.noise_type,
-        dsge_order=3,
-        dsge_basis='robust',
+        dsge_order=dsge_order,
+        dsge_basis=dsge_basis,
+        dsge_variant=dsge_variant,
         batch_size=bs,
         epochs=args.epochs,
         learning_rate=lr,
@@ -246,6 +281,7 @@ def run_hybrid(dataset_dir: Path, cfg: dict, args) -> dict:
         data_fraction=args.partial_train,
         output_dir=args.shared_run_dir,
         run_id=args.run_id,
+        device=args.device,
     ).train()
 
 
@@ -342,6 +378,9 @@ def parse_args():
                    help="Fraction of dataset to use (0 < f <= 1). Useful for quick debug runs.")
     p.add_argument("--run-id", default=None,
                    help="Optional run ID (e.g. run_20260330_8c4d2660). If not provided, one will be generated.")
+    p.add_argument("--device", default="cuda",
+                   choices=["cuda", "mps", "cpu", "auto"],
+                   help="Force a specific device (default: auto-detect cuda → mps → cpu)")
     return p.parse_args()
 
 
@@ -372,6 +411,15 @@ def main():
     with open(dataset_dir / "dataset_config.json") as f:
         cfg = json.load(f)
 
+    # Resolve device and apply batch-size scaling for MPS / large-memory systems.
+    device_pref = args.device if args.device != 'auto' else None
+    resolved_device = get_device(device_pref)
+    bs_mult = get_batch_size_multiplier(resolved_device)
+    args.device = str(resolved_device)          # pass as string to trainer constructors
+    args._device = resolved_device              # torch.device for empty_cache()
+    args._bs_mult = bs_mult                     # for _resolve_batch_size()
+
+    print(f"Device  : {resolved_device}" + (f" (batch multiplier ×{bs_mult:.1f})" if bs_mult != 1.0 else ""))
     print(f"Dataset : {dataset_dir.name}")
     print(f"Config  : block_size={cfg['block_size']}, sample_rate={cfg['sample_rate']}, "
           f"scenario={cfg.get('scenario', '?')}")
@@ -431,8 +479,7 @@ def main():
             finally:
                 gc.collect()
                 try:
-                    import torch
-                    torch.cuda.empty_cache()
+                    empty_cache(args._device)
                 except Exception:
                     pass
 
@@ -442,7 +489,7 @@ def main():
     if CLOUD_TRAINING:
         print(f"\n🚀 Cloud Training mode: Pushing results to S3...")
         push_runs_to_s3(dataset_dir.name, str(shared_run_dir))
-        
+
         print(f"Terminating pod as training is finished...")
         # Run termination script via subprocess for robustness
         import subprocess

@@ -104,9 +104,12 @@ class UnetAutoencoderTrainer:
         self.noverlap = nperseg * 3 // 4   # 75% overlap (Hann COLA satisfied)
         self.pad = nperseg // 2
         self.random_state = random_state
+        from train.repro_utils import set_global_seed
+        set_global_seed(random_state)
         self.data_fraction = data_fraction
         self.output_dir = Path(output_dir) if output_dir is not None else None
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        from train.device_utils import get_device
+        self.device = get_device(device)
 
         self.run_id = run_id or uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
@@ -156,6 +159,14 @@ class UnetAutoencoderTrainer:
 
     # ── data ──────────────────────────────────────────────────────────────────
 
+    def _precompute_stft_mag(self, signals: np.ndarray, chunk_size: int = 50000) -> torch.Tensor:
+        """Precompute STFT magnitudes on CPU in chunks. [N, T] → [N, 1, F, T']."""
+        chunks = []
+        for i in range(0, len(signals), chunk_size):
+            x = torch.tensor(signals[i:i + chunk_size], dtype=torch.float32)
+            chunks.append(self._stft_batch(x).abs().unsqueeze(1))
+        return torch.cat(chunks)
+
     def _load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
         clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
@@ -165,14 +176,18 @@ class UnetAutoencoderTrainer:
         assert noisy.shape[1] == self.signal_len, \
             f"Signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
 
-        dummy = torch.zeros(1, self.signal_len)
-        spec0 = self._stft_batch(dummy)
-        input_shape = (int(spec0.shape[1]), int(spec0.shape[2]))
+        # Precompute STFT magnitudes on CPU (one-time cost, eliminates STFT from training loop)
+        print("  Precomputing STFT magnitudes on CPU …")
+        noisy_mag = self._precompute_stft_mag(noisy)
+        clean_mag = self._precompute_stft_mag(clean)
+        input_shape = (int(noisy_mag.shape[2]), int(noisy_mag.shape[3]))
+        print(f"  Done: {noisy_mag.shape} per set, "
+              f"{2 * noisy_mag.nelement() * 4 / 1e9:.1f} GB total")
 
-        dataset = TensorDataset(
-            torch.tensor(noisy, dtype=torch.float32),
-            torch.tensor(clean, dtype=torch.float32),
-        )
+        noisy_raw = torch.tensor(noisy, dtype=torch.float32)
+        clean_raw = torch.tensor(clean, dtype=torch.float32)
+
+        dataset = TensorDataset(noisy_mag, clean_mag, noisy_raw, clean_raw)
         total = len(dataset)
         val_len  = int(0.25 * total)
         test_len = int(0.25 * total)
@@ -181,14 +196,12 @@ class UnetAutoencoderTrainer:
             dataset, [train_len, val_len, test_len],
             generator=torch.Generator().manual_seed(self.random_state),
         )
-        pin = torch.cuda.is_available()
+        from train.device_utils import get_dataloader_kwargs
+        dl_kw = get_dataloader_kwargs(self.device)
         return (
-            DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            DataLoader(val_set,   batch_size=self.batch_size,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            DataLoader(test_set,  batch_size=self.batch_size,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True, **dl_kw),
+            DataLoader(val_set,   batch_size=self.batch_size, **dl_kw),
+            DataLoader(test_set,  batch_size=self.batch_size, **dl_kw),
             input_shape,
         )
 
@@ -202,16 +215,17 @@ class UnetAutoencoderTrainer:
         mag = spec.abs().unsqueeze(1)
         with torch.no_grad():
             out_mag = self.model(mag) * mag
-        out_spec = out_mag.squeeze(1) * torch.exp(1j * torch.angle(spec))
+        phase = spec / (spec.abs() + 1e-8)
+        out_spec = out_mag.squeeze(1) * phase
         return self._istft_batch(out_spec).cpu().numpy()
 
     # ── validation ────────────────────────────────────────────────────────────
 
     def _compute_val_snr(self) -> float:
         all_true, all_pred = [], []
-        for noisy, clean in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
-            all_pred.append(self.denoise_numpy(noisy.numpy()))
-            all_true.append(clean.numpy())
+        for _nm, _cm, noisy_raw, clean_raw in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
+            all_pred.append(self.denoise_numpy(noisy_raw.numpy()))
+            all_true.append(clean_raw.numpy())
         return float(SignalToNoiseRatio.calculate(
             np.concatenate(all_true), np.concatenate(all_pred)
         ))
@@ -220,9 +234,9 @@ class UnetAutoencoderTrainer:
         self.model.eval()
         total = 0.0
         with torch.no_grad():
-            for noisy, clean in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
-                nm_t = self._stft_batch(noisy.to(self.device)).abs().unsqueeze(1)
-                cm_t = self._stft_batch(clean.to(self.device)).abs().unsqueeze(1)
+            for noisy_mag, clean_mag, _, _ in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
+                nm_t = noisy_mag.to(self.device)
+                cm_t = clean_mag.to(self.device)
                 total += loss_fn(self.model(nm_t) * nm_t, cm_t).item()
         return total / len(self.val_loader)
 
@@ -244,13 +258,13 @@ class UnetAutoencoderTrainer:
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             epoch_loss = 0.0
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
+            from train.device_utils import reset_peak_memory
+            reset_peak_memory(self.device)
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
-            for noisy, clean in pbar:
-                nm_t = self._stft_batch(noisy.to(self.device)).abs().unsqueeze(1)
-                cm_t = self._stft_batch(clean.to(self.device)).abs().unsqueeze(1)
+            for noisy_mag, clean_mag, _, _ in pbar:
+                nm_t = noisy_mag.to(self.device)
+                cm_t = clean_mag.to(self.device)
                 loss = loss_fn(self.model(nm_t) * nm_t, cm_t)
 
                 optimizer.zero_grad()
@@ -259,8 +273,8 @@ class UnetAutoencoderTrainer:
                 epoch_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
 
-            vram_str = (f" | vram={torch.cuda.max_memory_allocated() / 1024**3:.2f}GB"
-                        if torch.cuda.is_available() else "")
+            from train.device_utils import format_vram_str
+            vram_str = format_vram_str(self.device)
 
             val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
@@ -338,9 +352,9 @@ class UnetAutoencoderTrainer:
 
     def _evaluate_test(self) -> dict:
         all_true, all_pred = [], []
-        for noisy, clean in self.test_loader:
-            all_pred.append(self.denoise_numpy(noisy.numpy()))
-            all_true.append(clean.numpy())
+        for _, _, noisy_raw, clean_raw in self.test_loader:
+            all_pred.append(self.denoise_numpy(noisy_raw.numpy()))
+            all_true.append(clean_raw.numpy())
         y_true = np.concatenate(all_true)
         y_pred = np.concatenate(all_pred)
         metrics = {

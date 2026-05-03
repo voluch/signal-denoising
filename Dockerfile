@@ -16,6 +16,8 @@ COPY requirements.txt .
 # Install dependencies and clean up pip cache
 RUN pip install --no-cache-dir -r requirements.txt && \
     rm -rf /root/.cache/pip
+RUN pip install --no-cache-dir -r requirements-cuda.txt && \
+    rm -rf /root/.cache/pip
 
 # Copy the rest of the project (uses .dockerignore to skip unnecessary files)
 COPY . .

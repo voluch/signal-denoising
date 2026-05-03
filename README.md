@@ -1,395 +1,153 @@
-# Signal Denoising — Non-Gaussian Noise Study
+# CLAUDE.md
 
-## Мета дослідження
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Стандартний підхід у задачах знешумлення сигналів: тренувати нейронну мережу
-на даних з гауссовим шумом (AWGN). Це математично зручно, але у реальних
-радіосистемах шум часто **негауссовий**: суміш різних процесів з важкими
-хвостами, імпульсними сплесками, нестаціонарними характеристиками.
+## Project Overview
 
-**Центральна гіпотеза:** нейронна мережа, навчена на негауссовому шумі,
-буде краще знешумлювати реальні сигнали порівняно з мережею тієї ж архітектури,
-навченою на гауссовому шумі.
+Neural network-based radio signal denoising research. Tests whether models trained on non-Gaussian (polygaussian) noise outperform models trained on standard Gaussian (AWGN) noise for real-world radio signals.
 
-**Методологія:**
+- **Signal:** Real-valued 1D, 1024 samples at 8192 Hz (~125ms blocks)
+- **Scenarios:** FPV telemetry (SNR -5..+15 dB) and deep space (SNR -20..0 dB)
+- **Core hypothesis:** NN trained on realistic non-Gaussian noise generalizes better than AWGN-trained NN
 
-```
-Датасет A (AWGN)          -> Архітектура X -> NN_A -+
-                                                      +-> Порівняння метрик на test set
-Датасет B (Non-Gaussian)  -> Архітектура X -> NN_B -+
-```
-
-Обидві мережі мають **однакову архітектуру** і тренуються на даних однакового
-обсягу при однакових SNR. Єдина змінна — тип шуму в тренувальних даних.
-Якщо NN_B стабільно краще, це свідчить про цінність відповідного
-моделювання шуму. Якщо різниця несуттєва, AWGN-апроксимація виправдана.
-
-Якщо гіпотеза підтверджується, наступний крок — дослідження архітектурних
-оптимізацій під негауссові шуми.
-
----
-
-## Точка інтеграції в реальній системі
-
-```
-Антена -> LNA -> Mixer -> [IF фільтр] -> ADC -> DSP
-  RF (МГц/ГГц)  |                               ^
-            Downconversion                Тут працює NN
-```
-
-Ми працюємо з **baseband-сигналом після downconversion**: цифровим потоком
-після АЦП, де реальна несуча (МГц/ГГц) вже перенесена до нуля або низької IF.
-Це природна точка інтеграції для будь-якого SDR-приймача: всі наступні алгоритми
-(демодуляція, декодування) отримують вже знешумлений сигнал.
-
-**Real-valued vs I/Q:** SDR-приймач видає комплексний I/Q-сигнал.
-Для цього дослідження обрано **real-valued** представлення:
-гіпотеза перевіряється незалежно від форми представлення сигналу,
-а real-valued зменшує кількість архітектурних змінних і дозволяє
-сфокусуватись на ефекті розподілу шуму. Перехід до I/Q — природний
-наступний крок після підтвердження гіпотези.
-
-**Block-based processing:** нейронна мережа обробляє фіксовані блоки
-по 1024 семпли. При частоті дискретизації 8192 Гц це відповідає
-латентності ~125 мс, прийнятній для більшості застосувань реального часу.
-Fully convolutional архітектура дозволяє застосовувати модель до блоків
-довільної довжини без переробки при деплої.
-
----
-
-## Структура проекту
-
-```
-signal-denoising/
-├── data_generation/
-│   ├── generation.py          <- генератор синтетичних датасетів
-│   ├── evaluate_dataset.py    <- оцінка якості датасету через аналіз кумулянтів
-│   └── datasets/              <- згенеровані датасети (gitignored)
-│       └── fpv_telemetry_..._<uid>/
-│           ├── dataset_config.json
-│           ├── train/         <- clean_signals.npy, gaussian_signals.npy, non_gaussian_signals.npy
-│           ├── test/          <- per-SNR test files: test_m05dB_gaussian.npy, ...
-│           └── weights/       <- ваги моделей (створюється автоматично)
-│               ├── runs/
-│               │   ├── run_20260324_a1b2c3d4_UnetAutoencoder_gaussian/
-│               │   │   ├── model_best.pth
-│               │   │   └── figures/
-│               │   │       ├── training_curves.png
-│               │   │       └── snr_curve.png
-│               │   ├── run_20260324_e5f6a7b8_UnetAutoencoder_non_gaussian/
-│               │   ├── run_20260324_c9d0e1f2_HybridDSGE_UNet_fractional_S3_gaussian/
-│               │   │   ├── model_best.pth
-│               │   │   ├── dsge_state.npz
-│               │   │   └── figures/
-│               │   └── run_20260324_g3h4i5j6_Wavelet_gaussian/
-│               │       └── best_params.json
-│               ├── figures/           <- порівняльні графіки (compare_report.py)
-│               │   ├── fig1_snr_heatmap.png
-│               │   ├── fig2_combined_snr_curves.png
-│               │   ├── fig3_per_model_comparison.png
-│               │   ├── fig4_dsge_scatter.png
-│               │   └── fig5_example_denoising.png
-│               ├── comparison_report_<ts>.md
-│               ├── comparison_report_<ts>_uk.md
-│               ├── comparison_data_<ts>.csv
-│               └── training_report_<ts>.md
-├── models/                    <- архітектури моделей
-│   ├── autoencoder_unet.py
-│   ├── autoencoder_resnet.py
-│   ├── autoencoder_vae.py
-│   ├── time_series_trasformer.py
-│   ├── hybrid_unet.py
-│   ├── dsge_layer.py
-│   └── wavelet.py
-├── train/                     <- скрипти тренування та аналізу
-│   ├── train_all.py           <- тренування всіх моделей на обох типах шуму
-│   ├── compare_report.py      <- крос-оцінка + порівняльний звіт
-│   ├── sweep_hybrid.py        <- перебір архітектур HybridDSGE_UNet
-│   ├── training_uae.py
-│   ├── training_resnet.py
-│   ├── training_vae.py
-│   ├── training_transformer.py
-│   ├── training_hybrid.py
-│   ├── wavelet_grid_search.py
-│   └── snr_curve.py           <- утиліти: per-SNR eval, криві SNR, тренувальні криві
-├── inference/
-│   └── inference_hybrid.py    <- inference для гібридної моделі
-├── metrics.py
-└── README.md
-```
-
----
-
-## Датасет
-
-Синтетичний датасет моделює **цифровий baseband-сигнал після downconversion**
-для двох сценаріїв:
-
-- **fpv_telemetry** (дефолт): FPV-телеметрія / ELRS-подібні системи, QPSK, SNR −5..+15 дБ
-- **deep_space**: умови дальнього космічного зв'язку, BPSK/QPSK, SNR −20..0 дБ
-
-Для кожного прикладу генерується три версії: чистий сигнал, з AWGN і з негауссовим шумом.
-Основний тип негауссового шуму — **стаціонарний полігауссовий (polygauss)**: суміш K гауссіан
-з випадково обраними параметрами, що імітує одночасну присутність кількох джерел завад.
-
-Детальна документація: [`data_generation/README.md`](data_generation/README.md)
+## Common Commands
 
 ```bash
-# Генерація датасету (дефолт: fpv_telemetry, polygauss, qpsk, 400 000 прикладів)
+# Generate dataset (default: FPV telemetry, 400k samples)
 python data_generation/generation.py
+python data_generation/generation.py --scenario deep_space --n-samples 200000
 
-# Оцінка якості
-python data_generation/evaluate_dataset.py data_generation/datasets/<run_folder>/
+# Train all models on both noise types
+python train/train_all.py --dataset data_generation/datasets/<name> --epochs 50
+
+# Quick debug run (5% data, 2 epochs)
+python train/train_all.py --dataset data_generation/datasets/<name> --partial-train 0.05 --epochs 2
+
+# Train specific models/noise types
+python train/train_all.py --dataset <path> --models unet,resnet --noise-types gaussian
+
+# With W&B logging
+python train/train_all.py --dataset <path> --wandb-project signal-denoising
+
+# Train individual model
+python train/training_uae.py --dataset <path> --noise-type non_gaussian --epochs 30
+
+# DSGE basis sweep (13 combos via train/sweep_hybrid.py)
+python train/sweep_hybrid.py --dataset <path> --noise-types non_gaussian --epochs 30
+
+# Full DSGE ablation sweep (24 configs: Variant A/B × 3 bases × 2 orders × 2 noise types)
+python experiments/run_dsge_sweep.py --dataset <path> --epochs 30
+
+# Generate cross-evaluation report
+python train/compare_report.py --run <dataset>/weights/runs/run_YYYYMMDD_<uuid>
+
+# Batch inference on a saved run
+python inference/inference_all_models.py --run <dataset>/weights/runs/run_YYYYMMDD_<uuid> --input <signals.npy>
+
+# Evaluate dataset quality (cumulant-based analysis)
+python data_generation/evaluate_dataset.py data_generation/datasets/<name>/
 ```
 
----
+## Architecture
 
-## Налаштування середовища
+### Models (in `models/`)
+
+| Model | Domain | Approach |
+|-------|--------|----------|
+| U-Net (`autoencoder_unet.py`) | Spectral | STFT → predict sigmoid mask → iSTFT |
+| ResNet (`autoencoder_resnet.py`) | Spectral | Same STFT mask approach |
+| VAE (`autoencoder_vae.py`) | Spectral | Variational autoencoder with STFT |
+| Transformer (`time_series_trasformer.py`) | Time | Raw signal → self-attention → denoised signal |
+| Hybrid DSGE-UNet (`hybrid_unet.py`) | Spectral | Multi-channel input: original STFT + DSGE basis STFTs; configurable `base_channels` |
+| Wavelet (`wavelet.py`) | Time-Freq | Classical grid search (CPU-only baseline) |
+
+**Spectral models** all follow: signal → STFT(nperseg=128, 75% overlap) → model predicts mask ∈ [0,1] → mask × noisy_spectrum → iSTFT. Uses `torch.stft`/`torch.istft` on GPU.
+
+**DSGE layer** (`dsge_layer.py`): Nonlinear basis expansion (fractional, polynomial, trigonometric, robust) fitted via Tikhonov-regularized least squares (`tikhonov_lambda=0.01`). Provides two channel strategies for the Hybrid U-Net:
+- **Variant A:** [reconstruction, residual] — 2 extra channels
+- **Variant B:** [reconstruction, weighted basis components] — outperforms A in experiments
+
+`dsge_layer.fit(clean, noisy)` is called once on training data; state serialized to `.npz` alongside `model_best.pth`.
+
+### Training Pipeline (`train/`)
+
+Each model has a `Trainer` class with a uniform interface:
+- `__init__()`: loads data, creates model/optimizer/scheduler
+- `train() → dict`: training loop, returns results with metrics
+- `denoise_numpy(noisy: np.ndarray) → np.ndarray`: batch inference `[N, 1024] → [N, 1024]`
+
+**train_all.py** orchestrates: for each noise_type × model → train → save best weights (by val_SNR) → evaluate per-SNR.
+
+**Key training details:**
+- Loss: MSE for Gaussian, SmoothL1(β=0.02) for non-Gaussian (see `train/losses.py`)
+- Optimizer: Adam with ReduceLROnPlateau (patience=3, factor=0.5)
+- Early stopping: patience=5
+- Data split: 50% train / 25% val / 25% test
+- Model order: Transformer first (largest VRAM consumer, avoids fragmentation)
+
+### Per-model defaults (tuned for ~8GB GPU)
+
+| Model | Batch Size | Learning Rate |
+|-------|-----------|---------------|
+| Transformer | 128 | 1e-3 (stalls at 1e-4) |
+| U-Net | 1024 | 1e-3 |
+| VAE | 8192 | 6e-4 |
+| ResNet | 2048 | 6e-4 |
+| Hybrid | 4096 | 3e-4 |
+| Wavelet | 512 | N/A (grid search) |
+
+### Evaluation (`train/compare_report.py`, `train/snr_curve.py`)
+
+Cross-evaluates all trained models on both Gaussian and non-Gaussian test sets. Outputs:
+- Markdown reports (English + Ukrainian)
+- CSV/JSON data tables
+- Figures: SNR heatmap, per-model curves, DSGE scatter, example denoising
+
+Metrics in `metrics.py`: MSE, MAE, RMSE, SNR (dB). SNR = 10·log₁₀(Σclean² / Σnoise²).
+
+### Inference (`inference/`)
+
+Per-model inference wrappers (`inference_uae.py`, `inference_resnet.py`, etc.) and a unified `inference_all_models.py`. `inference_hybrid.py` handles DSGE state loading from `.npz` before inference.
+
+### Data Generation (`data_generation/generation.py`)
+
+Generates synthetic QPSK/BPSK signals with configurable noise. Output per dataset:
+- `train/` and `test/`: `clean_signals.npy`, `gaussian_signals.npy`, `non_gaussian_signals.npy`
+- `dataset_config.json`: block_size, sample_rate, scenario params
+- Test sets have per-SNR files at ~10 discrete SNR levels
+
+### Output Structure
+
+```
+<dataset>/weights/runs/run_YYYYMMDD_<uuid>/
+├── <Model>_<noise_type>/
+│   ├── model_best.pth (or best_params.json for wavelet)
+│   └── figures/
+├── comparison_report_<ts>.md
+├── comparison_data_<ts>.csv
+└── figures/
+```
+
+## Key Dependencies
+
+PyTorch 2.6, NumPy, SciPy (STFT), PyWavelets, matplotlib, wandb (optional). Use `requirements-cuda.txt` for NVIDIA GPU setups (pins CUDA 12.4 packages).
+
+## Environment Setup
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt          # CPU / MPS
+pip install -r requirements-cuda.txt     # NVIDIA GPU
+
+# Create .env manually (.env.template was removed):
+echo "WANDB_API_KEY=your_key_here" > .env
 ```
 
-Для логування в Weights & Biases:
+## Experiments
 
-1. Створи акаунт на [wandb.ai](https://wandb.ai) (безкоштовно)
-2. Скопіюй API ключ зі [wandb.ai/settings](https://wandb.ai/settings)
-3. Додай ключ у `.env`:
+`experiments/` contains reproducibility bash scripts (`dsge_*.sh`, `fpv_experiment.sh`) and `run_dsge_sweep.py` for systematic DSGE ablations. Research findings are tracked in `experiments/RESEARCH_STATUS_*.md`.
 
-```bash
-cp .env.template .env
-# відредагуйте .env — вставте WANDB_API_KEY=твій_ключ
-```
+There is no formal test suite (`tests/` is empty); correctness is validated through the experiment pipeline and compare_report outputs.
 
-4. Передай назву проєкту при запуску через `--wandb-project <назва>`
+## Device Support
 
-`.env` вже в `.gitignore` і ніколи не потрапить у репозиторій.
-Якщо `.env` відсутній або `--wandb-project` не вказано — скрипти працюють
-без W&B, просто не логуючи метрики.
-
----
-
-## Тренування у Docker
-
-Для зручності тренування на сервері можна використати Docker. Образ містить всі залежності (PyTorch, CUDA, etc).
-
-### Побудова образу
-
-```bash
-docker build -t signal-denoising-train .
-```
-
-### Запуск тренування
-
-Вам потрібно прокинути папку з датасетом у контейнер через `--volume` (або `-v`).
-
-```bash
-# Припустимо, датасет знаходиться в ./data_generation/datasets/my_dataset
-docker run --rm -it \
-  --gpus all \
-  -v "$(pwd)/data_generation/datasets:/app/data_generation/datasets" \
-  signal-denoising-train \
-  --dataset data_generation/datasets/my_dataset \
-  --wandb-project my-denoising-project
-```
-
-Якщо потрібно передати `WANDB_API_KEY`, використовуйте `-e`:
-
-```bash
-docker run --rm -it \
-  --gpus all \
-  -e WANDB_API_KEY=your_key_here \
-  -v "$(pwd)/data_generation/datasets:/app/data_generation/datasets" \
-  signal-denoising-train \
-  --dataset data_generation/datasets/deep_space_polygauss_qpsk_bs1024_n3000_993897f3 \
-  --wandb-project my-denoising-project
-```
-
-Результати (ваги та звіти) будуть збережені всередині папки датасету, яка прокинута з хост-системи.
-
-## Швидкий старт
-
-```bash
-DATASET=data_generation/datasets/<назва_датасету>
-
-# 1. Тренування всіх моделей на обох типах шуму (дефолтні параметри)
-python train/train_all.py --dataset $DATASET
-
-# 2. Порівняльний звіт із крос-оцінкою та графіками
-#    RUN — конкретна папка рану, наприклад:
-#    data_generation/datasets/<name>/runs/run_20260325_abcd1234
-python train/compare_report.py --run $RUN
-```
-
-Готово. Звіти та графіки збережено в папці рану (`<dataset>/runs/<run>/`).
-
----
-
-## Тренування моделей
-
-### `train_all.py` — тренування всіх моделей
-
-Тренує всі (або вибрані) моделі на обох типах шуму. Кожна комбінація
-(модель × тип шуму) дає окремий файл ваг.
-
-```bash
-DATASET=data_generation/datasets/<назва_датасету>
-
-# Всі моделі, обидва типи шуму (за замовчуванням)
-python train/train_all.py --dataset $DATASET
-
-# Тільки певні моделі
-python train/train_all.py --dataset $DATASET --models unet,resnet,wavelet
-
-# Тільки один тип шуму
-python train/train_all.py --dataset $DATASET --noise-types non_gaussian
-
-# З W&B логуванням
-python train/train_all.py --dataset $DATASET --wandb-project signal-denoising
-```
-
-**Аргументи:**
-
-| Аргумент | За замовчуванням | Опис |
-|---|---|---|
-| `--dataset` | — | Шлях до папки датасету (обов'язковий) |
-| `--noise-types` | `all` | `gaussian`, `non_gaussian` або `all` |
-| `--models` | `all` | Через кому або `all`: `unet,resnet,vae,transformer,wavelet,hybrid` |
-| `--epochs` | `50` | Максимальна кількість епох (early stopping зупинить раніше) |
-| `--batch-size` | per-model | Розмір батча (авто per-model, або явно) |
-| `--lr` | `1e-4` | Learning rate |
-| `--nperseg` | `128` | Розмір вікна STFT (для спектральних моделей) |
-| `--seed` | `42` | Random seed |
-| `--wandb-project` | `""` | W&B project (порожньо = вимкнено) |
-| `--partial-train` | `1.0` | Частка датасету для тренування/валідації (0 < f ≤ 1). Лише для відлагодження — дозволяє пройти повний цикл тренування всіх моделей на малому підмножині даних без тривалого очікування. Наприклад, `--partial-train 0.05` бере перші 5% зразків. |
-
-> **Примітка щодо `--partial-train`:** параметр призначений виключно для debug-запусків.
-> Він рівномірно зрізає початок масиву після завантаження `.npy`, тому пропорції
-> train/val/test (50%/25%/25%) зберігаються, але на значно меншому обсязі даних.
-> Результати таких запусків не слід порівнювати з повноцінним тренуванням.
-
-```bash
-# Швидкий debug-запуск: 5% датасету, 2 епохи, всі моделі
-python train/train_all.py --dataset $DATASET --partial-train 0.05 --epochs 2
-```
-
-Після тренування в `<dataset>/weights/` з'являться:
-
-```
-weights/
-├── runs/
-│   ├── run_20260324_a1b2c3d4_UnetAutoencoder_gaussian/
-│   │   ├── model_best.pth
-│   │   └── figures/
-│   │       ├── training_curves.png   <- loss + val_SNR по епохах
-│   │       └── snr_curve.png
-│   ├── run_20260324_e5f6a7b8_UnetAutoencoder_non_gaussian/
-│   ├── run_20260324_..._ResNetAutoencoder_gaussian/
-│   ├── run_20260324_..._SpectrogramVAE_non_gaussian/
-│   ├── run_20260324_..._TimeSeriesTransformer_gaussian/
-│   ├── run_20260324_..._HybridDSGE_UNet_fractional_S3_gaussian/
-│   │   ├── model_best.pth
-│   │   └── dsge_state.npz
-│   ├── run_20260324_..._Wavelet_gaussian/
-│   │   └── best_params.json
-│   └── ...
-└── training_report_<timestamp>.md
-```
-
-Кожен запуск створює **нову** підпапку з унікальним іменем `run_{дата}_{uuid}_{модель}_{тип_шуму}` —
-попередні ваги не перезаписуються, можна порівнювати кілька ранів.
-
-### Тренування окремих моделей
-
-```bash
-python train/training_uae.py         --dataset $DATASET --noise-type non_gaussian --epochs 30
-python train/training_resnet.py      --dataset $DATASET --noise-type non_gaussian --epochs 50
-python train/training_vae.py         --dataset $DATASET --noise-type non_gaussian --epochs 50
-python train/training_transformer.py --dataset $DATASET --noise-type non_gaussian --epochs 50
-python train/wavelet_grid_search.py  --dataset $DATASET --noise-type non_gaussian
-python train/training_hybrid.py      --dataset $DATASET --noise-type non_gaussian --epochs 30
-```
-
-### HybridDSGE_UNet — перебір архітектур
-
-Тестує всі комбінації базисних функцій і порядків полінома (13 конфігурацій):
-
-```bash
-python train/sweep_hybrid.py --dataset $DATASET --noise-types non_gaussian --epochs 30
-
-# З W&B для порівняння в UI
-python train/sweep_hybrid.py --dataset $DATASET --wandb-project signal-denoising
-```
-
-Додаткові параметри `training_hybrid.py`:
-
-| Аргумент | За замовчуванням | Опис |
-|---|---|---|
-| `--dsge-order` | `3` | Кількість DSGE-каналів (S) |
-| `--dsge-basis` | `fractional` | `fractional`, `polynomial`, `trigonometric`, `robust` |
-| `--dsge-powers` | `0.5 1.5 2.0` | Степені/частоти через пробіл |
-| `--lambda` | `0.01` | Коефіцієнт λ регуляризації Тіхонова |
-
----
-
-## Порівняльний звіт
-
-```bash
-# Крос-оцінка всіх натренованих моделей + звіт
-python train/compare_report.py --run $RUN
-```
-
-Скрипт автоматично знаходить всі `.pth` і `.json` у `weights/`, оцінює кожну
-модель на **обох** тестових наборах (gaussian і non_gaussian) та генерує:
-
-| Файл | Опис |
-|------|------|
-| `comparison_report_<ts>.md` | Звіт англійською (з поясненнями) |
-| `comparison_report_<ts>_uk.md` | Звіт українською |
-| `comparison_data_<ts>.csv` | Плоска таблиця всіх метрик (model × train × test × SNR_in) |
-| `comparison_data_<ts>.json` | Те саме у JSON |
-| `figures/fig1_snr_heatmap.png` | Теплова карта SNR: всі комбінації train→test |
-| `figures/fig2_combined_snr_curves.png` | Всі моделі на одному графіку (суцільний = G-train, штрих = NG-train) |
-| `figures/fig3_per_model_comparison.png` | Для кожної моделі: вплив типу навчання на криву SNR |
-| `figures/fig4_dsge_scatter.png` | Scatter архітектур DSGE: узагальнення по обох тестах |
-| `figures/fig5_example_denoising.png` | Приклад знешумлення сигналу |
-
-Крім того, для кожного навченого варіанту в `runs/run_{дата}_{uuid}_{модель}_{тип}/figures/` зберігаються:
-- `training_curves.png` — loss і val_SNR по епохах (для контролю оверфіту, не в основному звіті)
-- `snr_curve.png` — крива SNR на тренувальному типі шуму
-
----
-
-## Моделі
-
-| Модель | Клас | Опис |
-|--------|------|------|
-| **U-Net** | `UnetAutoencoder` | STFT-маска (sigmoid) × noisy_spec → clean_spec, MSELoss |
-| **ResNet** | `ResNetAutoencoder` | STFT-маска (sigmoid) × noisy_spec → clean_spec, MSELoss |
-| **VAE** | `SpectrogramVAE` | Варіаційний autoencoder: noisy_spec → clean_spec, MSELoss + KL |
-| **Transformer** | `TimeSeriesTransformer` | Time-domain, noisy → clean, MSELoss |
-| **Wavelet** | `WaveletDenoising` | Порогова обробка вейвлет-коефіцієнтів, grid search |
-| **HybridDSGE** | `HybridDSGE_UNet` | U-Net + DSGE-канали нелінійних ознак, MSELoss |
-
-Всі нейронні моделі:
-- Supervised: тренуються відображати зашумлений сигнал → чистий (ціль — clean, не noisy)
-- Оптимізуються за критерієм `max(val_SNR)` — зберігаються ваги з найкращим SNR на валідації
-- `ReduceLROnPlateau(patience=3, factor=0.5)` на `val_SNR` + early stopping після 7 епох без покращення
-- Підтримують `denoise_numpy(noisy: [N,T]) → [N,T]` — уніфікований API для inference
-
----
-
-## TODO
-
-1. ~~add generation of polygaussian noise~~
-2. refactor code to support variable signal lengths
-3. ~~write separate classes for training and models~~
-4. ~~generate big dataset~~
-5. ~~train models on both noise types~~
-6. ~~create comparison report with cross-evaluation~~
-7. ~~evaluate with `nperseg=128, noverlap=96` across all models~~
-
-## Articles
-
-- compare different denoising approaches (analytical, transformers, autoencoders) under Gaussian vs non-Gaussian noise
-- compare architectures of autoencoders for signal denoising
+`train/device_utils.py` auto-detects CUDA → MPS (Apple Silicon) → CPU. MPS fallback is active on M-series Macs with PyTorch 2.6.
