@@ -151,9 +151,12 @@ if __name__ == '__main__':
             all_env_vars = [v for v in all_env_vars if v["key"] != extra_var["key"]]
         all_env_vars.append(extra_var)
 
-    # Format env vars for GraphQL
+    # Format env vars for GraphQL — escape backslashes then double quotes in values
+    def _gql_escape(s):
+        return s.replace('\\', '\\\\').replace('"', '\\"')
+
     env_vars_graphql = ", ".join([
-        f'{{key: "{var["key"]}", value: "{var["value"]}"}}'
+        f'{{key: "{var["key"]}", value: "{_gql_escape(var["value"])}"}}'
         for var in all_env_vars
     ])
 
