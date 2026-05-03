@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import re
 import runpod
 import os
 from runpod.api import graphql
@@ -14,6 +15,8 @@ def parse_extra_envs(extra_envs_str):
     - Newline-separated:
       KEY1=VALUE1
       KEY2=VALUE2
+    - JSON object values: KEY1={"a": 1, "b": 2} KEY2=simple
+    - Quoted values: KEY1="some value" KEY2='other value'
     - Mixed formats
 
     Returns: List of dicts [{"key": "KEY1", "value": "VALUE1"}, ...]
@@ -23,23 +26,28 @@ def parse_extra_envs(extra_envs_str):
 
     env_vars = []
 
-    # Replace commas and newlines with spaces for uniform parsing
-    normalized = extra_envs_str.replace(',', ' ').replace('\n', ' ')
+    # Match KEY=VALUE where VALUE is one of:
+    #   {…}        JSON object (may contain spaces and commas)
+    #   "…"        double-quoted string (supports \" escapes inside)
+    #   '…'        single-quoted string (supports \' escapes inside)
+    #   [^\s,]+    simple token (no whitespace or comma)
+    pattern = re.compile(
+        r'([A-Za-z_][A-Za-z0-9_]*)='
+        r'(\{[^}]*\}|"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|[^\s,]+)'
+    )
 
-    # Split by spaces and filter empty strings
-    pairs = [pair.strip() for pair in normalized.split() if pair.strip()]
+    for match in pattern.finditer(extra_envs_str):
+        key = match.group(1)
+        value = match.group(2)
 
-    for pair in pairs:
-        if '=' not in pair:
-            print(f"⚠️  Skipping invalid env var (no '='): {pair}")
-            continue
-
-        key, value = pair.split('=', 1)  # Split only on first '='
-        key = key.strip()
-        value = value.strip()
+        # Strip wrapping quotes and unescape internal escape sequences
+        if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            value = value[1:-1].replace('\\"', '"')
+        elif len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+            value = value[1:-1].replace("\\'", "'")
 
         if not key:
-            print(f"⚠️  Skipping env var with empty key: {pair}")
+            print(f"⚠️  Skipping env var with empty key: {match.group(0)}")
             continue
 
         env_vars.append({"key": key, "value": value})
@@ -60,7 +68,8 @@ if __name__ == '__main__':
     EXTRA_DOCKER_ARGS = os.environ['EXTRA_DOCKER_ARGS']
     MODEL = os.environ.get('MODEL', 'all')
     RUN_ID = os.environ.get('RUN_ID', '')
-    WANDB_API_KEY_SECRET = os.environ.get('RUNPOD_API_KEY_SECRET', '')
+    WANDB_API_KEY = os.environ.get('WANDB_API_KEY', '')
+    RUNPOD_API_KEY_SECRET = os.environ.get('RUNPOD_API_KEY', '')
     AWS_ACCESS_KEY_ID = os.environ.get('AWS_ACCESS_KEY_ID', '')
     AWS_SECRET_ACCESS_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY', '')
     S3_BUCKET = os.environ.get('S3_BUCKET', '')
@@ -109,11 +118,10 @@ if __name__ == '__main__':
         {"key": "PYTHONUNBUFFERED", "value": "1"},
         {"key": "CLOUD_TRAINING", "value": "True"},
     ]
-    if WANDB_API_KEY_SECRET:
-        base_env_vars.append({"key": "WANDB_API_KEY", "value": WANDB_API_KEY_SECRET})
-    if not any(v["key"] == "RUNPOD_API_KEY" for v in base_env_vars) and WANDB_API_KEY_SECRET:
-        # Also provide it as RUNPOD_API_KEY for the termination script if not already there
-        base_env_vars.append({"key": "RUNPOD_API_KEY", "value": WANDB_API_KEY_SECRET})
+    if WANDB_API_KEY:
+        base_env_vars.append({"key": "WANDB_API_KEY", "value": WANDB_API_KEY})
+    if RUNPOD_API_KEY_SECRET:
+        base_env_vars.append({"key": "RUNPOD_API_KEY", "value": RUNPOD_API_KEY_SECRET})
     if AWS_ACCESS_KEY_ID:
         base_env_vars.append({"key": "AWS_ACCESS_KEY_ID", "value": AWS_ACCESS_KEY_ID})
     if AWS_SECRET_ACCESS_KEY:
