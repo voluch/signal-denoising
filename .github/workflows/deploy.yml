@@ -171,6 +171,7 @@ jobs:
         id: template
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          EXTRA_ENVS_STR: ${{ inputs.extra_envs }}
         run: |
           #!/bin/bash
           set -e
@@ -190,7 +191,6 @@ jobs:
           export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           export S3_BUCKET="${{ secrets.S3_BUCKET }}"
           export WANDB_API_KEY="${{ secrets.WANDB_API_KEY }}"
-          export EXTRA_ENVS_STR="${{ inputs.extra_envs }}"
 
           cd .github/scripts
           python runpod_manage_template.py
@@ -222,6 +222,7 @@ jobs:
         id: update_template
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          EXTRA_ENVS_STR: ${{ inputs.extra_envs }}
         run: |
           #!/bin/bash
           set -e
@@ -241,7 +242,6 @@ jobs:
           export AWS_SECRET_ACCESS_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}"
           export S3_BUCKET="${{ secrets.S3_BUCKET }}"
           export WANDB_API_KEY="${{ secrets.WANDB_API_KEY }}"
-          export EXTRA_ENVS_STR="${{ inputs.extra_envs }}"
           export RUNPOD_POD_ID="${{ steps.pod.outputs.pod_id }}"
 
           cd .github/scripts
