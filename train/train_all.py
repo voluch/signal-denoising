@@ -18,6 +18,7 @@ import gc
 import json
 import os
 import sys
+import time
 import uuid as _uuid_mod
 from datetime import datetime
 from pathlib import Path
@@ -387,6 +388,14 @@ def parse_args():
 def main():
     args = parse_args()
 
+    print("\n" + "=" * 60)
+    print("🚀 Unified Training Script Starting")
+    print("=" * 60)
+    print("Input Arguments:")
+    for arg, value in vars(args).items():
+        print(f"  {arg}: {value}")
+    print("=" * 60 + "\n")
+
     dataset_dir = Path(args.dataset)
     if not dataset_dir.is_absolute():
         dataset_dir = ROOT / dataset_dir
@@ -457,6 +466,10 @@ def main():
         ALL_MODELS if args.models == "all"
         else [m.strip() for m in args.models.split(",")]
     )
+    print("Noise types:", noise_types)
+    print("Models to train:", models_to_train)
+    print("Count:", len(models_to_train))
+    print("Unique count:", len(set(models_to_train)))
 
     results = []
     for noise_type in noise_types:
@@ -469,11 +482,26 @@ def main():
             if runner is None:
                 print(f"Unknown model '{m}', skipping")
                 continue
+
+            start_t = time.time()
             try:
                 result = runner(dataset_dir, cfg, args)
                 results.append(result)
+
+                elapsed = time.time() - start_t
+                print(f"\n" + "=" * 60)
+                print(f"✅ ALL DONE FOR: {m} ({noise_type})")
+                print(f"   Total Runner Time: {elapsed // 60:.0f}m {elapsed % 60:.1f}s")
+                print("=" * 60 + "\n")
+
             except Exception as exc:
-                print(f"ERROR training {m} ({noise_type}): {exc}")
+                elapsed = time.time() - start_t
+                print(f"\n" + "!" * 60)
+                print(f"❌ TRAINING FAILED: {m} ({noise_type})")
+                print(f"   Time elapsed: {elapsed // 60:.0f}m {elapsed % 60:.1f}s")
+                print(f"   Error: {exc}")
+                print("!" * 60 + "\n")
+
                 results.append({'model': m, 'noise_type': noise_type, 'error': str(exc)})
                 exc.__traceback__ = None  # release GPU tensor refs held in traceback frames
             finally:

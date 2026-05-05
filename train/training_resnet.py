@@ -201,6 +201,20 @@ class ResNetAutoencoderTrainer:
     # ── training loop ─────────────────────────────────────────────────────────
 
     def train(self) -> dict:
+        import time
+        start_time = time.time()
+
+        print(f"\nTraining Configuration for {MODEL_NAME}:")
+        print(f"  Noise Type:   {self.noise_type}")
+        print(f"  Batch Size:   {self.batch_size}")
+        print(f"  Epochs:       {self.epochs}")
+        print(f"  Learn Rate:   {self.lr}")
+        print(f"  Device:       {self.device}")
+        print(f"  Signal Len:   {self.signal_len}")
+        print(f"  STFT nperseg: {self.nperseg}")
+        print(f"  Random Seed:  {self.random_state}")
+        print(f"  Data Frac:    {self.data_fraction}")
+
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
         loss_fn = select_loss(self.noise_type)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -295,6 +309,16 @@ class ResNetAutoencoderTrainer:
 
         if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
             wandb.finish()
+
+        elapsed = time.time() - start_time
+        print(f"\n" + "=" * 60)
+        print(f"🏁 TRAINING FINISHED: {MODEL_NAME} ({self.noise_type})")
+        print(f"   Total Time: {elapsed // 60:.0f}m {elapsed % 60:.1f}s")
+        print(f"   Best Val SNR: {best_val_snr:.2f} dB")
+        if test_metrics:
+            m_str = " | ".join([f"{k}: {v:.6f}" if k != "SNR" else f"{k}: {v:.2f} dB" for k, v in test_metrics.items()])
+            print(f"   Test Metrics: {m_str}")
+        print("=" * 60 + "\n")
 
         return {
             'model': MODEL_NAME, 'noise_type': self.noise_type,

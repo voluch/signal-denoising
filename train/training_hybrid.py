@@ -507,6 +507,23 @@ class HybridUnetTrainer:
     # ── training loop ─────────────────────────────────────────────────────────
 
     def train(self) -> dict:
+        import time
+        start_time = time.time()
+
+        print(f"\nTraining Configuration for {self.model_name}:")
+        print(f"  Noise Type:   {self.noise_type}")
+        print(f"  Batch Size:   {self.batch_size}")
+        print(f"  Epochs:       {self.epochs}")
+        print(f"  Learn Rate:   {self.lr}")
+        print(f"  Device:       {self.device}")
+        print(f"  DSGE Order:   {self.dsge_order}")
+        print(f"  DSGE Basis:   {self.dsge_basis}")
+        print(f"  DSGE Variant: {self.dsge_variant}")
+        print(f"  Signal Len:   {self.signal_len}")
+        print(f"  STFT nperseg: {self.nperseg}")
+        print(f"  Random Seed:  {self.random_state}")
+        print(f"  Data Frac:    {self.data_fraction}")
+
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
         loss_fn = select_loss(
             self.noise_type,
@@ -636,6 +653,16 @@ class HybridUnetTrainer:
 
         if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
             wandb.finish()
+
+        elapsed = time.time() - start_time
+        print(f"\n" + "=" * 60)
+        print(f"🏁 TRAINING FINISHED: {self.model_name} ({self.noise_type})")
+        print(f"   Total Time: {elapsed // 60:.0f}m {elapsed % 60:.1f}s")
+        print(f"   Best Val SNR: {best_val_snr:.2f} dB")
+        if test_metrics:
+            m_str = " | ".join([f"{k}: {v:.6f}" if k != "SNR" else f"{k}: {v:.2f} dB" for k, v in test_metrics.items()])
+            print(f"   Test Metrics: {m_str}")
+        print("=" * 60 + "\n")
 
         return {
             'model': self.model_name, 'noise_type': self.noise_type,
