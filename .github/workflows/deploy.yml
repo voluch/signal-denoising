@@ -77,19 +77,47 @@ on:
         type: string
         default: ''
 
-      model:
-        description: 'Model to train'
-        required: true
-        type: choice
-        default: 'all'
-        options:
-          - all
-          - resnet
-          - unet
-          - vae
-          - transformer
-          - hybrid
-          - wavelet
+      model_all:
+        description: 'Train ALL models'
+        required: false
+        type: boolean
+        default: true
+
+      model_resnet:
+        description: 'Train ResNet'
+        required: false
+        type: boolean
+        default: false
+
+      model_unet:
+        description: 'Train UNet'
+        required: false
+        type: boolean
+        default: false
+
+      model_vae:
+        description: 'Train VAE'
+        required: false
+        type: boolean
+        default: false
+
+      model_transformer:
+        description: 'Train Transformer'
+        required: false
+        type: boolean
+        default: false
+
+      model_hybrid:
+        description: 'Train Hybrid'
+        required: false
+        type: boolean
+        default: false
+
+      model_wavelet:
+        description: 'Train Wavelet'
+        required: false
+        type: boolean
+        default: false
 
       image_tag:
         description: 'Docker image tag (e.g., latest, containerize-training)'
@@ -152,6 +180,25 @@ jobs:
           echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
           echo "🚀 Generated Run ID: ${RUN_ID}"
 
+      - name: Resolve Models
+        id: models
+        run: |
+          if [ "${{ inputs.model_all }}" == "true" ]; then
+            SELECTED="all"
+          else
+            SELECTED=""
+            [ "${{ inputs.model_resnet }}" == "true" ] && SELECTED="${SELECTED}resnet,"
+            [ "${{ inputs.model_unet }}" == "true" ] && SELECTED="${SELECTED}unet,"
+            [ "${{ inputs.model_vae }}" == "true" ] && SELECTED="${SELECTED}vae,"
+            [ "${{ inputs.model_transformer }}" == "true" ] && SELECTED="${SELECTED}transformer,"
+            [ "${{ inputs.model_hybrid }}" == "true" ] && SELECTED="${SELECTED}hybrid,"
+            [ "${{ inputs.model_wavelet }}" == "true" ] && SELECTED="${SELECTED}wavelet,"
+            SELECTED=${SELECTED%,}
+            if [ -z "$SELECTED" ]; then SELECTED="all"; fi
+          fi
+          echo "selected_models=$SELECTED" >> $GITHUB_OUTPUT
+          echo "🎯 Selected models: $SELECTED"
+
       - name: Install RunPod SDK
         run: pip install runpod
 
@@ -183,7 +230,7 @@ jobs:
           export DATASET_PATH="${{ inputs.dataset_path }}"
           export WANDB_PROJECT="${{ inputs.wandb_project }}"
           export EXTRA_DOCKER_ARGS="${{ inputs.extra_docker_args }}"
-          export MODEL="${{ inputs.model }}"
+          export MODEL="${{ steps.models.outputs.selected_models }}"
           export RUN_ID="${{ steps.run_id.outputs.run_id }}"
           export IMAGE_TAG="${{ inputs.image_tag }}"
           export RUNPOD_API_KEY_SECRET="${{ secrets.RUNPOD_API_KEY }}"
@@ -234,7 +281,7 @@ jobs:
           export DATASET_PATH="${{ inputs.dataset_path }}"
           export WANDB_PROJECT="${{ inputs.wandb_project }}"
           export EXTRA_DOCKER_ARGS="${{ inputs.extra_docker_args }}"
-          export MODEL="${{ inputs.model }}"
+          export MODEL="${{ steps.models.outputs.selected_models }}"
           export RUN_ID="${{ steps.run_id.outputs.run_id }}"
           export IMAGE_TAG="${{ inputs.image_tag }}"
           export RUNPOD_API_KEY_SECRET="${{ secrets.RUNPOD_API_KEY }}"
@@ -264,6 +311,7 @@ jobs:
           echo "| **Chosen Data Center** | ${{ steps.pod.outputs.datacenter }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Storage Size** | ${{ inputs.storage_size_gb }} GB |" >> $GITHUB_STEP_SUMMARY
           echo "| **Image** | \`${{ steps.image.outputs.image_tag }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Models** | \`${{ steps.models.outputs.selected_models }}\` |" >> $GITHUB_STEP_SUMMARY
 
       - name: Skipped Summary
         if: steps.pod.outputs.action == 'skipped'
@@ -276,5 +324,6 @@ jobs:
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| **Run ID (New)** | \`${{ steps.run_id.outputs.run_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Pod URL** | [${{ steps.pod.outputs.pod_url }}](${{ steps.pod.outputs.pod_url }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Models** | \`${{ steps.models.outputs.selected_models }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "To replace, run with 'Replace existing pod' checked." >> $GITHUB_STEP_SUMMARY
