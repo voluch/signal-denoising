@@ -347,38 +347,55 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
     if not run_dir.exists():
         return {}
 
+    # Pre-populate with all base models so they appear in the report even if missing
     entries = {}
+    for mc in BASE_MODELS:
+        for nt in NOISE_TYPES:
+            name = f"{mc}_{nt}"
+            entries[name] = {
+                'denoise_fn':  None,
+                'model_class': mc,
+                'noise_type':  nt,
+                'is_hybrid':   False,
+                'dsge_basis':  None,
+                'dsge_order':  None,
+                'run_dir':     run_dir / name,
+            }
+
     for model_dir in sorted(run_dir.iterdir()):
         if not model_dir.is_dir():
             continue
         name = model_dir.name  # e.g. "UnetAutoencoder_gaussian"
 
         # Parse noise type (last segment is gaussian or non_gaussian)
+        noise_type = None
+        model_part = None
         for nt in ['non_gaussian', 'gaussian']:  # check longer first
             if name.endswith(f'_{nt}'):
                 noise_type = nt
                 model_part = name[: -(len(nt) + 1)]
                 break
         else:
-            print(f"  [skip] Cannot parse noise type from: {name}")
+            if name != 'figures':
+                print(f"  [skip] Cannot parse noise type from: {name}")
             continue
 
+        mc = model_part
+        is_hybrid = False
+        basis = None
+        order = None
         try:
+            fn = None
             if model_part == 'UnetAutoencoder':
                 fn = _load_unet(model_dir, cfg, nperseg)
-                mc = 'UnetAutoencoder'; is_hybrid = False
             elif model_part == 'ResNetAutoencoder':
                 fn = _load_resnet(model_dir, cfg, nperseg)
-                mc = 'ResNetAutoencoder'; is_hybrid = False
             elif model_part == 'SpectrogramVAE':
                 fn = _load_vae(model_dir, cfg, nperseg)
-                mc = 'SpectrogramVAE'; is_hybrid = False
             elif model_part == 'TimeSeriesTransformer':
                 fn = _load_transformer(model_dir, cfg)
-                mc = 'TimeSeriesTransformer'; is_hybrid = False
             elif model_part == 'Wavelet':
                 fn = _load_wavelet(model_dir)
-                mc = 'Wavelet'; is_hybrid = False
             elif model_part.startswith('HybridDSGE_UNet_'):
                 # _model_name: HybridDSGE_UNet_<basis>_S<order>_v<A|B>[_w<width>]
                 m = re.match(r'HybridDSGE_UNet_(.+?)_S(\d+)_v([AB])(?:_w(\d+))?$', model_part)
@@ -398,24 +415,38 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                                   dsge_variant=variant, unet_width=width,
                                   nperseg=nperseg)
                 mc = model_part; is_hybrid = True
-                dsge_variant = variant
             else:
                 print(f"  [skip] Unknown model: {model_part}")
                 continue
+
+            entries[name] = {
+                'denoise_fn':  fn,
+                'model_class': mc,
+                'noise_type':  noise_type,
+                'is_hybrid':   is_hybrid,
+                'dsge_basis':  basis,
+                'dsge_order':  order,
+                'run_dir':     model_dir,
+            }
+            if fn:
+                print(f"  Loaded: {name}")
+            else:
+                print(f"  [warn] Weights not found for: {name}")
+
         except Exception as e:
             print(f"  [warn] Failed to load {name}: {e}")
+            # Ensure it's in entries even if failed (important for base models)
+            if name not in entries:
+                entries[name] = {
+                    'denoise_fn':  None,
+                    'model_class': mc if mc else model_part,
+                    'noise_type':  noise_type,
+                    'is_hybrid':   is_hybrid,
+                    'dsge_basis':  basis,
+                    'dsge_order':  order,
+                    'run_dir':     model_dir,
+                }
             continue
-
-        entries[name] = {
-            'denoise_fn':  fn,
-            'model_class': mc,
-            'noise_type':  noise_type,
-            'is_hybrid':   is_hybrid,
-            'dsge_basis':  basis if is_hybrid else None,
-            'dsge_order':  order if is_hybrid else None,
-            'run_dir':     model_dir,
-        }
-        print(f"  Loaded: {name}")
 
     return entries
 
@@ -434,6 +465,9 @@ def cross_evaluate(entries: dict, test_dir: Path, batch_size: int = 512) -> dict
     for name, info in tqdm(entries.items(), desc="Evaluating models", unit="model"):
         results[name] = {}
         for test_nt in tqdm(NOISE_TYPES, desc=f"  {name[:28]}", leave=False, unit="noise"):
+            if info.get('denoise_fn') is None:
+                results[name][test_nt] = {'per_snr': {}, 'overall': {}}
+                continue
             per_snr = evaluate_per_snr(info['denoise_fn'], test_dir, test_nt,
                                        batch_size=batch_size)
             results[name][test_nt] = {
@@ -1038,39 +1072,37 @@ def generate_report_uk(results: dict, entries: dict, figures: list,
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
-def main():
-    p = argparse.ArgumentParser(description='Cross-evaluation comparison report')
-    p.add_argument('--run',     required=True,
-                   help='Path to a specific training run directory '
-                        '(e.g. dataset/runs/run_20260325_abcd1234)')
-    p.add_argument('--nperseg', type=int, default=128)
-    p.add_argument('--seed',    type=int, default=42)
-    args = p.parse_args()
+def run_compare_report(run_dir: str | Path, nperseg: int = 128, seed: int = 42):
+    """
+    Programmatic entry point for generating the comparison report.
+    Can be called from other scripts (e.g. train_all.py).
+    """
+    np.random.seed(seed)
 
-    np.random.seed(args.seed)
-
-    run_path = Path(args.run)
+    run_path = Path(run_dir)
     if not run_path.is_absolute():
         run_path = ROOT / run_path
     if not run_path.exists():
-        print(f'ERROR: run directory not found: {run_path}'); sys.exit(1)
+        print(f'ERROR: run directory not found: {run_path}')
+        return False
 
-    # run_path = <dataset>/runs/run_<date>_<uid>  (new)
-    #          = <dataset>/weights/runs/run_<date>_<uid>  (legacy)
+    # Find dataset root (where dataset_config.json lives)
     candidate = run_path.parent.parent
     if not (candidate / 'dataset_config.json').exists():
         candidate = candidate.parent
     dataset_path = candidate
-    cfg_file     = dataset_path / 'dataset_config.json'
+    cfg_file = dataset_path / 'dataset_config.json'
     if not cfg_file.exists():
-        print(f'ERROR: dataset_config.json not found at {dataset_path}'); sys.exit(1)
+        print(f'ERROR: dataset_config.json not found at {dataset_path}')
+        return False
 
-    test_dir    = dataset_path / 'test'
+    test_dir = dataset_path / 'test'
     figures_dir = run_path / 'figures'
     figures_dir.mkdir(parents=True, exist_ok=True)
 
     if not test_dir.exists():
-        print(f'ERROR: test directory not found: {test_dir}'); sys.exit(1)
+        print(f'ERROR: test directory not found: {test_dir}')
+        return False
 
     with open(cfg_file) as f:
         cfg = json.load(f)
@@ -1078,10 +1110,10 @@ def main():
     print(f'\nDataset : {dataset_path.name}')
     print(f'Run     : {run_path.name}')
     print(f'\nLoading models from {run_path} ...')
-    entries = discover_runs(run_path, cfg, args.nperseg)
+    entries = discover_runs(run_path, cfg, nperseg)
     if not entries:
         print('ERROR: no trained models found in the run directory.')
-        sys.exit(1)
+        return False
 
     print(f'\nRunning cross-evaluation ({len(entries)} models × 2 test sets)...')
     results = cross_evaluate(entries, test_dir)
@@ -1117,6 +1149,21 @@ def main():
                        run_path, timestamp, csv_path)
 
     print(f'\n✅ Done. Output saved to: {run_path}')
+    return True
+
+
+def main():
+    p = argparse.ArgumentParser(description='Cross-evaluation comparison report')
+    p.add_argument('--run',     required=True,
+                   help='Path to a specific training run directory '
+                        '(e.g. dataset/runs/run_20260325_abcd1234)')
+    p.add_argument('--nperseg', type=int, default=128)
+    p.add_argument('--seed',    type=int, default=42)
+    args = p.parse_args()
+
+    success = run_compare_report(args.run, args.nperseg, args.seed)
+    if not success:
+        sys.exit(1)
 
 
 if __name__ == '__main__':
