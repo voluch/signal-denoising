@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
 
 from aws_scripts.download_dataset_from_s3 import download_dataset_from_s3
 from aws_scripts.push_runs_to_s3 import push_runs_to_s3
+from train.compare_report import run_compare_report
 
 import wandb
 
@@ -515,6 +516,12 @@ def main():
     print(f"\n✅ Done. Weights and report saved to: {shared_run_dir}")
 
     if CLOUD_TRAINING:
+        print(f"\n📊 Generating comprehensive comparison report...")
+        try:
+            run_compare_report(shared_run_dir, nperseg=args.nperseg, seed=args.seed)
+        except Exception as e:
+            print(f"Warning: Comprehensive comparison report failed: {e}")
+
         print(f"\n🚀 Cloud Training mode: Pushing results to S3...")
         push_runs_to_s3(dataset_dir.name, str(shared_run_dir))
 
