@@ -258,17 +258,26 @@ class UnetAutoencoderTrainer:
         print(f"  Random Seed:  {self.random_state}")
         print(f"  Data Frac:    {self.data_fraction}")
 
-        optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+        optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=1e-4)
         loss_fn = select_loss(self.noise_type)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', patience=3, factor=0.5, threshold=0.01
+            optimizer,
+            mode="min",  # monitor SNR
+            patience=5,
+            factor=0.5,
+            threshold=0.02,  # dB
+            threshold_mode="abs",
+            cooldown=2,
+            min_lr=1e-5,
         )
+
         best_val_loss = float("inf")
         best_val_snr  = float("-inf")
         best_sd = None
         train_history, val_snr_history = [], []
         no_improve = 0
-        early_stop_patience = 5
+        early_stop_patience = 999
+        min_epochs=25
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
@@ -323,6 +332,10 @@ class UnetAutoencoderTrainer:
                 if no_improve >= early_stop_patience:
                     print(f"  Early stopping: no improvement for {early_stop_patience} epochs")
                     break
+
+            if epoch >= min_epochs and no_improve >= early_stop_patience:
+                print(f"Early stopping: no SNR improvement for {early_stop_patience} epochs")
+                break
 
         # ── save ──────────────────────────────────────────────────────────────
         if self.output_dir is not None:
