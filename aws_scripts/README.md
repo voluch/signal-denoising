@@ -19,7 +19,7 @@ Downloads a complete dataset from S3 to the local `data_generation/datasets/` di
 
 **Usage:**
 ```bash
-python aws_scripts/download_dataset_from_s3.py <dataset_name>
+python aws_scripts/download_dataset_from_s3.py deep_space_polygauss_qpsk_bs1024_n400000_c054e749
 ```
 
 **Options:**

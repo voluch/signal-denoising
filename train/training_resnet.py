@@ -38,7 +38,7 @@ class ResNetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
                  batch_size=1024, epochs=50, learning_rate=6e-4,
                  signal_len=256, fs=8192, nperseg=128, random_state=42,
-                 wandb_project="", data_fraction=1.0, output_dir=None,
+                 wandb_project="", data_fraction=1.0, output_dir=None, device=None,
                  run_id: str | None = None):
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
@@ -51,9 +51,12 @@ class ResNetAutoencoderTrainer:
         self.noverlap = int(nperseg * 0.75)
         self.pad = nperseg // 2
         self.random_state = random_state
+        from train.repro_utils import set_global_seed
+        set_global_seed(random_state)
         self.data_fraction = data_fraction
         self.output_dir = Path(output_dir) if output_dir is not None else None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        from train.device_utils import get_device
+        self.device = get_device(device)
 
         self.run_id = run_id or uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
@@ -107,6 +110,14 @@ class ResNetAutoencoderTrainer:
         spec = self._stft_batch(signal_batch.squeeze(1).to(self.device))
         return spec.abs().unsqueeze(1)
 
+    def _precompute_stft_mag(self, signals: np.ndarray, chunk_size: int = 50000) -> torch.Tensor:
+        """Precompute STFT magnitudes on CPU in chunks. [N, T] → [N, 1, F, T']."""
+        chunks = []
+        for i in range(0, len(signals), chunk_size):
+            x = torch.tensor(signals[i:i + chunk_size], dtype=torch.float32)
+            chunks.append(self._stft_batch(x).abs().unsqueeze(1))
+        return torch.cat(chunks)
+
     def load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
         clean = np.load(self.dataset_path / "train" / "clean_signals.npy")
@@ -115,10 +126,18 @@ class ResNetAutoencoderTrainer:
             noisy, clean = noisy[:n], clean[:n]
         assert noisy.shape[1] == self.signal_len
 
-        X = torch.tensor(noisy[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)  # [N,1,T]
-        y = torch.tensor(clean[:, :self.signal_len], dtype=torch.float32).unsqueeze(1)
+        # Precompute STFT magnitudes on CPU (one-time cost)
+        print("  Precomputing STFT magnitudes on CPU …")
+        noisy_mag = self._precompute_stft_mag(noisy)
+        clean_mag = self._precompute_stft_mag(clean)
+        input_shape = (int(noisy_mag.shape[2]), int(noisy_mag.shape[3]))
+        print(f"  Done: {noisy_mag.shape} per set, "
+              f"{2 * noisy_mag.nelement() * 4 / 1e9:.1f} GB total")
 
-        dataset = TensorDataset(X, y)
+        noisy_raw = torch.tensor(noisy, dtype=torch.float32).unsqueeze(1)  # [N,1,T]
+        clean_raw = torch.tensor(clean, dtype=torch.float32).unsqueeze(1)
+
+        dataset = TensorDataset(noisy_mag, clean_mag, noisy_raw, clean_raw)
         total = len(dataset)
         val_len  = int(0.25 * total)
         test_len = int(0.25 * total)
@@ -128,18 +147,13 @@ class ResNetAutoencoderTrainer:
             generator=torch.Generator().manual_seed(self.random_state),
         )
 
-        example = self._signal_to_mag_tensor(X[:1])
-        _, _, freq_bins, time_frames = example.shape
-
-        pin = torch.cuda.is_available()
+        from train.device_utils import get_dataloader_kwargs
+        dl_kw = get_dataloader_kwargs(self.device)
         return (
-            DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            DataLoader(val_set,   batch_size=self.batch_size,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            DataLoader(test_set,  batch_size=self.batch_size,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            (freq_bins, time_frames),
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True, **dl_kw),
+            DataLoader(val_set,   batch_size=self.batch_size, **dl_kw),
+            DataLoader(test_set,  batch_size=self.batch_size, **dl_kw),
+            input_shape,
         )
 
     # ── inference ─────────────────────────────────────────────────────────────
@@ -158,17 +172,18 @@ class ResNetAutoencoderTrainer:
         mag = spec.abs().unsqueeze(1)
         with torch.no_grad():
             out_mag = self.model(mag) * mag
-        out_spec = out_mag.squeeze(1) * torch.exp(1j * torch.angle(spec))
+        phase = spec / (spec.abs() + 1e-8)
+        out_spec = out_mag.squeeze(1) * phase
         return self._istft_batch(out_spec).unsqueeze(1)
 
     # ── validation ────────────────────────────────────────────────────────────
 
     def _compute_val_snr(self) -> float:
         all_true, all_pred = [], []
-        for X_batch, y_batch in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
-            pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
+        for _nm, _cm, noisy_raw, clean_raw in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
+            pred = self.denoise_numpy(noisy_raw.squeeze(1).numpy())
             all_pred.append(pred)
-            all_true.append(y_batch.squeeze(1).numpy())
+            all_true.append(clean_raw.squeeze(1).numpy())
         return float(SignalToNoiseRatio.calculate(
             np.concatenate(all_true), np.concatenate(all_pred)
         ))
@@ -177,15 +192,29 @@ class ResNetAutoencoderTrainer:
         self.model.eval()
         total = 0.0
         with torch.no_grad():
-            for X_batch, y_batch in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
-                noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
-                clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
-                total += loss_fn(self.model(noisy_spec) * noisy_spec, clean_spec).item()
+            for noisy_mag, clean_mag, _, _ in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
+                nm = noisy_mag.to(self.device)
+                cm = clean_mag.to(self.device)
+                total += loss_fn(self.model(nm) * nm, cm).item()
         return total / len(self.val_loader)
 
     # ── training loop ─────────────────────────────────────────────────────────
 
     def train(self) -> dict:
+        import time
+        start_time = time.time()
+
+        print(f"\nTraining Configuration for {MODEL_NAME}:")
+        print(f"  Noise Type:   {self.noise_type}")
+        print(f"  Batch Size:   {self.batch_size}")
+        print(f"  Epochs:       {self.epochs}")
+        print(f"  Learn Rate:   {self.lr}")
+        print(f"  Device:       {self.device}")
+        print(f"  Signal Len:   {self.signal_len}")
+        print(f"  STFT nperseg: {self.nperseg}")
+        print(f"  Random Seed:  {self.random_state}")
+        print(f"  Data Frac:    {self.data_fraction}")
+
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
         loss_fn = select_loss(self.noise_type)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -201,21 +230,21 @@ class ResNetAutoencoderTrainer:
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             total_loss = 0.0
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
+            from train.device_utils import reset_peak_memory
+            reset_peak_memory(self.device)
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
-            for X_batch, y_batch in pbar:
-                noisy_spec = self._signal_to_mag_tensor(X_batch.to(self.device))
-                clean_spec = self._signal_to_mag_tensor(y_batch.to(self.device))
-                mask = self.model(noisy_spec)
-                loss = loss_fn(mask * noisy_spec, clean_spec)
+            for noisy_mag, clean_mag, _, _ in pbar:
+                nm = noisy_mag.to(self.device)
+                cm = clean_mag.to(self.device)
+                mask = self.model(nm)
+                loss = loss_fn(mask * nm, cm)
                 optimizer.zero_grad(); loss.backward(); optimizer.step()
                 total_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
 
-            vram_str = (f" | vram={torch.cuda.max_memory_allocated() / 1024**3:.2f}GB"
-                        if torch.cuda.is_available() else "")
+            from train.device_utils import format_vram_str
+            vram_str = format_vram_str(self.device)
 
             val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
@@ -281,6 +310,16 @@ class ResNetAutoencoderTrainer:
         if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
             wandb.finish()
 
+        elapsed = time.time() - start_time
+        print(f"\n" + "=" * 60)
+        print(f"🏁 TRAINING FINISHED: {MODEL_NAME} ({self.noise_type})")
+        print(f"   Total Time: {elapsed // 60:.0f}m {elapsed % 60:.1f}s")
+        print(f"   Best Val SNR: {best_val_snr:.2f} dB")
+        if test_metrics:
+            m_str = " | ".join([f"{k}: {v:.6f}" if k != "SNR" else f"{k}: {v:.2f} dB" for k, v in test_metrics.items()])
+            print(f"   Test Metrics: {m_str}")
+        print("=" * 60 + "\n")
+
         return {
             'model': MODEL_NAME, 'noise_type': self.noise_type,
             'dataset_uid': self.dataset_uid, 'run_id': self.run_id,
@@ -291,10 +330,10 @@ class ResNetAutoencoderTrainer:
     def _evaluate_test(self) -> dict:
         all_true, all_pred = [], []
         with torch.no_grad():
-            for X_batch, y_batch in self.test_loader:
-                pred = self.denoise_numpy(X_batch.squeeze(1).numpy())
+            for _, _, noisy_raw, clean_raw in self.test_loader:
+                pred = self.denoise_numpy(noisy_raw.squeeze(1).numpy())
                 all_pred.append(pred)
-                all_true.append(y_batch.squeeze(1).numpy())
+                all_true.append(clean_raw.squeeze(1).numpy())
         y_true = np.concatenate(all_true)
         y_pred = np.concatenate(all_pred)
         metrics = {

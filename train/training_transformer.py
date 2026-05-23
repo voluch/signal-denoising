@@ -45,16 +45,16 @@ class TransformerTrainer:
         self.epochs = epochs
         self.lr = learning_rate
         self.random_state = random_state
+        from train.repro_utils import set_global_seed
+        set_global_seed(random_state)
         self.data_fraction = data_fraction
         self.output_dir = Path(output_dir) if output_dir is not None else None
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        from train.device_utils import get_device
+        self.device = get_device(device)
 
         self.run_id = run_id or uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
-
-        np.random.seed(self.random_state)
-        torch.manual_seed(self.random_state)
 
         if WANDB_OK and wandb_project:
             # Login if not already logged in
@@ -99,14 +99,12 @@ class TransformerTrainer:
             dataset, [train_len, val_len, test_len],
             generator=torch.Generator().manual_seed(self.random_state),
         )
-        pin = torch.cuda.is_available()
+        from train.device_utils import get_dataloader_kwargs
+        dl_kw = get_dataloader_kwargs(self.device)
         return (
-            DataLoader(train_set, batch_size=self.batch_size, shuffle=True,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            DataLoader(val_set,   batch_size=self.batch_size,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
-            DataLoader(test_set,  batch_size=self.batch_size,
-                       num_workers=4, pin_memory=pin, persistent_workers=True),
+            DataLoader(train_set, batch_size=self.batch_size, shuffle=True, **dl_kw),
+            DataLoader(val_set,   batch_size=self.batch_size, **dl_kw),
+            DataLoader(test_set,  batch_size=self.batch_size, **dl_kw),
         )
 
     # ── inference ─────────────────────────────────────────────────────────────
@@ -142,6 +140,18 @@ class TransformerTrainer:
     # ── training loop ─────────────────────────────────────────────────────────
 
     def train(self) -> dict:
+        import time
+        start_time = time.time()
+
+        print(f"\nTraining Configuration for {MODEL_NAME}:")
+        print(f"  Noise Type:   {self.noise_type}")
+        print(f"  Batch Size:   {self.batch_size}")
+        print(f"  Epochs:       {self.epochs}")
+        print(f"  Learn Rate:   {self.lr}")
+        print(f"  Device:       {self.device}")
+        print(f"  Random Seed:  {self.random_state}")
+        print(f"  Data Frac:    {self.data_fraction}")
+
         optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
         loss_fn = select_loss(self.noise_type)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -157,8 +167,8 @@ class TransformerTrainer:
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             train_loss = 0.0
-            if torch.cuda.is_available():
-                torch.cuda.reset_peak_memory_stats()
+            from train.device_utils import reset_peak_memory
+            reset_peak_memory(self.device)
 
             pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
             for X_batch, y_batch in pbar:
@@ -170,8 +180,8 @@ class TransformerTrainer:
                 train_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
 
-            vram_str = (f" | vram={torch.cuda.max_memory_allocated() / 1024**3:.2f}GB"
-                        if torch.cuda.is_available() else "")
+            from train.device_utils import format_vram_str
+            vram_str = format_vram_str(self.device)
 
             val_loss = self._compute_val_loss(loss_fn)
             val_snr  = self._compute_val_snr()
@@ -236,6 +246,16 @@ class TransformerTrainer:
 
         if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
             wandb.finish()
+
+        elapsed = time.time() - start_time
+        print(f"\n" + "=" * 60)
+        print(f"🏁 TRAINING FINISHED: {MODEL_NAME} ({self.noise_type})")
+        print(f"   Total Time: {elapsed // 60:.0f}m {elapsed % 60:.1f}s")
+        print(f"   Best Val SNR: {best_val_snr:.2f} dB")
+        if test_metrics:
+            m_str = " | ".join([f"{k}: {v:.6f}" if k != "SNR" else f"{k}: {v:.2f} dB" for k, v in test_metrics.items()])
+            print(f"   Test Metrics: {m_str}")
+        print("=" * 60 + "\n")
 
         return {
             'model': MODEL_NAME, 'noise_type': self.noise_type,

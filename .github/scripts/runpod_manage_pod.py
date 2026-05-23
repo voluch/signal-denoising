@@ -178,42 +178,43 @@ def wait_for_pod_runtime(pod_id: str, timeout_sec: int = 300, poll_sec: int = 5)
     return last_pod or {}
 
 
-def terminate_existing_pod_if_needed() -> Optional[Dict[str, Any]]:
+def resolve_pod_name() -> str:
+    """
+    Returns the pod name to deploy with:
+    - No existing pod with POD_NAME → use POD_NAME as-is.
+    - REPLACE=true and pod exists → terminate it, reuse POD_NAME.
+    - REPLACE=false and pod exists → find next free versioned name
+      (POD_NAME-2, POD_NAME-3, …) and deploy in parallel.
+    """
     pods = runpod.get_pods()
-    for pod in pods:
-        if pod.get("name") != POD_NAME:
-            continue
+    existing_names = {pod.get("name") for pod in pods}
 
-        print("Found existing pod:")
-        print(f"  ID: {pod['id']}")
-        print(f"  Status: {pod.get('desiredStatus', 'unknown')}")
+    base_pod = next((p for p in pods if p.get("name") == POD_NAME), None)
 
-        if REPLACE:
-            print(f"Terminating existing pod: {pod['id']}")
-            runpod.terminate_pod(pod["id"])
-            time.sleep(20)
-            return None
+    if base_pod is None:
+        return POD_NAME
 
-        pod_id = pod["id"]
-        full_pod = runpod.get_pod(pod_id)
-        pod_url = get_pod_url(full_pod)
+    print("Found existing pod:")
+    print(f"  ID: {base_pod['id']}")
+    print(f"  Status: {base_pod.get('desiredStatus', 'unknown')}")
 
-        print(f"Pod already exists: {pod_id}")
-        print(f"URL: {pod_url}")
-        print("Skipping deployment because REPLACE=false")
+    if REPLACE:
+        print(f"Terminating existing pod: {base_pod['id']}")
+        runpod.terminate_pod(base_pod["id"])
+        time.sleep(20)
+        return POD_NAME
 
-        write_github_output(
-            pod_id=pod_id,
-            pod_url=pod_url or "",
-            action="skipped",
-            datacenter=pod.get("dataCenterId", ""),
-        )
-        sys.exit(0)
-
-    return None
+    # Find next available versioned name
+    n = 2
+    while True:
+        candidate = f"{POD_NAME}-{n}"
+        if candidate not in existing_names:
+            print(f"Pod '{POD_NAME}' already exists — deploying parallel pod as '{candidate}'")
+            return candidate
+        n += 1
 
 
-def build_mutation_for_dc(dc: str) -> str:
+def build_mutation_for_dc(dc: str, pod_name: str) -> str:
     mutation_name = "podRentInterruptable" if USE_SPOT else "podFindAndDeployOnDemand"
     bid_line = "bidPerGpu: 0.0" if USE_SPOT else ""
 
@@ -226,7 +227,7 @@ def build_mutation_for_dc(dc: str) -> str:
             cloudType: SECURE
             gpuCount: 1
             gpuTypeId: "{GPU_TYPE}"
-            name: "{POD_NAME}"
+            name: "{pod_name}"
             templateId: "{TEMPLATE_ID}"
             dataCenterId: "{dc}"
             networkVolumeId: "{NETWORK_VOLUME_ID}"
@@ -237,7 +238,7 @@ def build_mutation_for_dc(dc: str) -> str:
             cloudType: SECURE
             gpuCount: 1
             gpuTypeId: "{GPU_TYPE}"
-            name: "{POD_NAME}"
+            name: "{pod_name}"
             templateId: "{TEMPLATE_ID}"
             dataCenterId: "{dc}"
             volumeInGb: {VOLUME_SIZE_GB}
@@ -256,14 +257,14 @@ def build_mutation_for_dc(dc: str) -> str:
     """
 
 
-def deploy_with_fallback(dcs_to_try: List[str]) -> Dict[str, Any]:
+def deploy_with_fallback(dcs_to_try: List[str], pod_name: str) -> Dict[str, Any]:
     mutation_name = "podRentInterruptable" if USE_SPOT else "podFindAndDeployOnDemand"
     last_error = None
 
     for dc in dcs_to_try:
         print(f"Trying datacenter: {dc}")
 
-        mutation = build_mutation_for_dc(dc)
+        mutation = build_mutation_for_dc(dc, pod_name)
 
         try:
             result = graphql.run_graphql_query(mutation)
@@ -324,7 +325,7 @@ def manage_pod() -> None:
     print(f"Use network volume: {USE_NETWORK_VOLUME}")
     print("=" * 60)
 
-    terminate_existing_pod_if_needed()
+    actual_pod_name = resolve_pod_name()
 
     if USE_NETWORK_VOLUME:
         volume_dc = get_network_volume_datacenter(NETWORK_VOLUME_ID)
@@ -335,7 +336,7 @@ def manage_pod() -> None:
 
     print(f"Candidate datacenters: {', '.join(dcs_to_try)}")
 
-    deployment = deploy_with_fallback(dcs_to_try)
+    deployment = deploy_with_fallback(dcs_to_try, actual_pod_name)
     pod_id = deployment["pod_id"]
     final_dc = deployment["final_dc"]
 
@@ -347,6 +348,7 @@ def manage_pod() -> None:
     print("\n" + "=" * 60)
     print("DEPLOYMENT SUMMARY")
     print("=" * 60)
+    print(f"Pod Name:      {actual_pod_name}")
     print(f"Pod ID:        {pod_id}")
     print(f"Pod URL:       {pod_url}")
     print(f"Template ID:   {TEMPLATE_ID}")

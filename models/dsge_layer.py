@@ -31,8 +31,23 @@ def fractional_basis(x: np.ndarray, powers: list[float]) -> np.ndarray:
 
 
 def polynomial_basis(x: np.ndarray, powers: list[float]) -> np.ndarray:
-    """Поліноміальний базис: φᵢ(x) = x^pᵢ  (цілі степені)."""
-    return np.array([x ** int(p) for p in powers])
+    """Поліноміальний базис: φᵢ(x) = x^pᵢ  (цілі степені ≥ 2, без лінійного x¹).
+
+    DSGE decomposition requires strictly nonlinear basis functions —
+    linear term φ(x) = x is excluded because it makes Z = 0 trivially.
+    Powers < 2 are silently skipped with a warning.
+    """
+    valid = [p for p in powers if int(p) >= 2]
+    if len(valid) < len(powers):
+        skipped = [p for p in powers if int(p) < 2]
+        import warnings
+        warnings.warn(
+            f"polynomial_basis: skipping linear/constant powers {skipped} — "
+            f"DSGE requires strictly nonlinear basis (φ(x) ≠ x). Using {valid}."
+        )
+    if not valid:
+        raise ValueError("polynomial_basis: no valid powers ≥ 2 provided")
+    return np.array([x ** int(p) for p in valid])
 
 
 def trigonometric_basis(x: np.ndarray, freqs: list[float]) -> np.ndarray:
@@ -133,6 +148,15 @@ class DSGEFeatureExtractor:
         self.k0: float | None = None
         self.gen_element_norm: float | None = None
 
+        # Class-specific fit state (H4): populated only by fit_class_specific()
+        self.K_bins: list | None = None
+        self.k0_bins: list | None = None
+        self.psi_bins: list | None = None
+        self.psi_0_bins: list | None = None
+        self.snr_edges: np.ndarray | None = None
+        self.n_bins: int = 0
+        self.bin_means: list | None = None
+
     # ──────────────────────────────────────────────────
     #  Обчислення базису
     # ──────────────────────────────────────────────────
@@ -145,6 +169,27 @@ class DSGEFeatureExtractor:
     #  Fit: навчання на тренувальних даних
     # ──────────────────────────────────────────────────
 
+    def _solve_bucket(self, clean: np.ndarray, noisy: np.ndarray):
+        """Solve (psi_0, psi, K, k0, S) for a single bucket of paired signals."""
+        psi_0 = float(clean.mean())
+        phi_all = self._basis_fn(noisy, self.powers).transpose(1, 0, 2)  # [N, S, T]
+        S = phi_all.shape[1]
+        psi = phi_all.mean(axis=(0, 2))  # [S]
+
+        phi_centered = phi_all - psi[np.newaxis, :, np.newaxis]
+        x_centered = clean - psi_0
+
+        phi_flat = phi_centered.transpose(1, 0, 2).reshape(S, -1)  # [S, N*T]
+        F = (phi_flat @ phi_flat.T) / phi_flat.shape[1]            # [S, S]
+        F_reg = F + self.tikhonov_lambda * np.eye(S)
+
+        x_flat = x_centered.reshape(1, -1)
+        B = (phi_flat @ x_flat.T).ravel() / phi_flat.shape[1]      # [S]
+
+        K = np.linalg.solve(F_reg, B)
+        k0 = psi_0 - float(K @ psi)
+        return psi_0, psi, K, k0, S
+
     def fit(self, clean_signals: np.ndarray, noisy_signals: np.ndarray) -> 'DSGEFeatureExtractor':
         """
         Обчислює статистики та коефіцієнти K на тренувальних даних.
@@ -154,35 +199,114 @@ class DSGEFeatureExtractor:
         clean_signals : np.ndarray, shape [N, T]
         noisy_signals : np.ndarray, shape [N, T]
         """
-        N, T = clean_signals.shape
-
         clean_norm = (clean_signals - clean_signals.mean(axis=1, keepdims=True)) / (
             clean_signals.std(axis=1, keepdims=True) + 1e-8
         )
         gen_element = clean_norm.mean(axis=0)
         self.gen_element_norm = float(np.linalg.norm(gen_element))
 
-        self.psi_0 = float(clean_signals.mean())
+        self.psi_0, self.psi, self.K, self.k0, self.S = \
+            self._solve_bucket(clean_signals, noisy_signals)
 
-        phi_all = self._basis_fn(noisy_signals, self.powers).transpose(1, 0, 2)  # [N, S, T]
-        self.S = phi_all.shape[1]  # actual order — correct for all basis types
-        self.psi = phi_all.mean(axis=(0, 2))  # [S]
-
-        phi_centered = phi_all - self.psi[np.newaxis, :, np.newaxis]
-        x_centered = clean_signals - self.psi_0
-
-        phi_flat = phi_centered.transpose(1, 0, 2).reshape(self.S, -1)  # [S, N*T]
-        F = (phi_flat @ phi_flat.T) / phi_flat.shape[1]                 # [S, S]
-        F_reg = F + self.tikhonov_lambda * np.eye(self.S)
-
-        x_flat = x_centered.reshape(1, -1)
-        B = (phi_flat @ x_flat.T).ravel() / phi_flat.shape[1]           # [S]
-
-        self.K = np.linalg.solve(F_reg, B)
-        self.k0 = self.psi_0 - float(self.K @ self.psi)
+        # Reset class-specific state (in case fit() called after fit_class_specific())
+        self.K_bins = None
+        self.k0_bins = None
+        self.psi_bins = None
+        self.psi_0_bins = None
+        self.snr_edges = None
+        self.n_bins = 0
+        self.bin_means = None
 
         self._fitted = True
         return self
+
+    def fit_class_specific(
+        self,
+        clean_signals: np.ndarray,
+        noisy_signals: np.ndarray,
+        snr_db: np.ndarray,
+        n_bins: int = 3,
+    ) -> 'DSGEFeatureExtractor':
+        """
+        Clase-specific fit: окремі K, k0, psi на кожен SNR bucket (H4).
+
+        Bucket edges — квантильні (рівна кількість семплів у кожному).
+        Глобальні K, k0, psi також зберігаються як fallback.
+
+        Parameters
+        ----------
+        clean_signals, noisy_signals : np.ndarray, shape [N, T]
+        snr_db : np.ndarray, shape [N]
+            Per-sample SNR (dB), використовується для бакетизації.
+        n_bins : int
+            Кількість bucket-ів (типово 3).
+        """
+        assert len(snr_db) == len(clean_signals), (
+            f"snr_db length {len(snr_db)} != N signals {len(clean_signals)}"
+        )
+        if n_bins < 2:
+            raise ValueError(f"n_bins must be ≥2, got {n_bins}")
+
+        # Generating element norm (global)
+        clean_norm = (clean_signals - clean_signals.mean(axis=1, keepdims=True)) / (
+            clean_signals.std(axis=1, keepdims=True) + 1e-8
+        )
+        gen_element = clean_norm.mean(axis=0)
+        self.gen_element_norm = float(np.linalg.norm(gen_element))
+
+        # Quantile-based bin edges for balanced buckets
+        quantiles = np.linspace(0, 1, n_bins + 1)
+        edges = np.quantile(snr_db, quantiles)
+        edges = edges.astype(float)
+        edges[0] = -np.inf
+        edges[-1] = np.inf
+
+        self.K_bins = []
+        self.k0_bins = []
+        self.psi_bins = []
+        self.psi_0_bins = []
+        self.snr_edges = edges
+        self.n_bins = n_bins
+        self.bin_means = []
+
+        print(f"[DSGE] Class-specific fit: {n_bins} buckets, quantile edges "
+              f"[{', '.join(f'{e:+.2f}' for e in edges)}] dB")
+        for b in range(n_bins):
+            in_bin = (snr_db >= edges[b]) & (snr_db < edges[b + 1])
+            n_in = int(in_bin.sum())
+            if n_in < 10:
+                raise ValueError(
+                    f"bucket {b} has only {n_in} samples (< 10); "
+                    f"try reducing n_bins or increasing data_fraction"
+                )
+            snr_mean = float(snr_db[in_bin].mean())
+            psi_0_b, psi_b, K_b, k0_b, S_b = self._solve_bucket(
+                clean_signals[in_bin], noisy_signals[in_bin]
+            )
+            self.K_bins.append(K_b)
+            self.k0_bins.append(k0_b)
+            self.psi_bins.append(psi_b)
+            self.psi_0_bins.append(psi_0_b)
+            self.bin_means.append(snr_mean)
+            K_str = ", ".join(f"{k:+.3f}" for k in K_b)
+            print(f"  bucket {b}  n={n_in:6d}  μSNR={snr_mean:+6.2f} dB  "
+                  f"K=[{K_str}]  k0={k0_b:+.4f}")
+
+        # Global fallback fit (used when snr_db not provided at inference)
+        self.psi_0, self.psi, self.K, self.k0, self.S = \
+            self._solve_bucket(clean_signals, noisy_signals)
+
+        self._fitted = True
+        return self
+
+    def bucket_for_snr(self, snr_db: float) -> int:
+        """Return bucket index for a given SNR. Requires fit_class_specific()."""
+        if self.K_bins is None:
+            raise RuntimeError("bucket_for_snr requires fit_class_specific()")
+        for b in range(self.n_bins):
+            if self.snr_edges[b] <= snr_db < self.snr_edges[b + 1]:
+                return b
+        return self.n_bins - 1
 
     # ──────────────────────────────────────────────────
     #  compute_basis
@@ -217,11 +341,90 @@ class DSGEFeatureExtractor:
     #  reconstruct: пряме DSGE-наближення
     # ──────────────────────────────────────────────────
 
-    def reconstruct(self, noisy_signal: np.ndarray) -> np.ndarray:
-        """Y = k₀ + Σ kᵢ·φᵢ(x̃). Вимагає fit()."""
+    def reconstruct(self, noisy_signal: np.ndarray, snr_db: float | None = None) -> np.ndarray:
+        """Y = k₀ + Σ kᵢ·φᵢ(x̃). Вимагає fit().
+
+        If class-specific fit is active and snr_db is provided, routes to the
+        matching bucket's (K_b, k0_b). Otherwise uses global (K, k0).
+        """
         self._check_fitted()
         phi = self.compute_basis(noisy_signal)
+        if self.K_bins is not None and snr_db is not None:
+            b = self.bucket_for_snr(float(snr_db))
+            return self.k0_bins[b] + (self.K_bins[b][:, np.newaxis] * phi).sum(axis=0)
         return self.k0 + (self.K[:, np.newaxis] * phi).sum(axis=0)
+
+    # ──────────────────────────────────────────────────
+    #  DSGE channel formation for Hybrid UNet
+    # ──────────────────────────────────────────────────
+
+    def compute_dsge_channels_A(
+        self, noisy_signal: np.ndarray, snr_db: float | None = None
+    ) -> np.ndarray:
+        """Variant A: reconstruction + residual.
+
+        Returns [2, F, T'] — two STFT magnitude spectrograms:
+          channel 0: |STFT(x̂_dsge)| — optimal DSGE reconstruction
+          channel 1: |STFT(Z_dsge)| — residual (what DSGE couldn't explain)
+
+        where x̂ = k₀ + Σ kᵢ·φᵢ(x̃),  Z = x̃ - x̂.
+
+        If class-specific fit active and snr_db provided → routes per bucket.
+        """
+        self._check_fitted()
+        x_hat = self.reconstruct(noisy_signal, snr_db=snr_db)  # [T]
+        z_residual = noisy_signal - x_hat                       # [T]
+
+        nperseg = self.stft_params.get('nperseg', 32)
+        noverlap = self.stft_params.get('noverlap', 16)
+        fs = self.stft_params.get('fs', 8192)
+
+        _, _, Zxx_hat = stft(x_hat, fs=fs, nperseg=nperseg, noverlap=noverlap)
+        _, _, Zxx_res = stft(z_residual, fs=fs, nperseg=nperseg, noverlap=noverlap)
+
+        return np.array([np.abs(Zxx_hat), np.abs(Zxx_res)])  # [2, F, T']
+
+    def compute_dsge_channels_B(
+        self, noisy_signal: np.ndarray, snr_db: float | None = None
+    ) -> np.ndarray:
+        """Variant B: reconstruction + weighted basis channels.
+
+        Returns [1+S, F, T'] — STFT magnitude spectrograms:
+          channel 0: |STFT(x̂_dsge)|         — optimal DSGE reconstruction
+          channels 1..S: |STFT(kᵢ·φᵢ(x̃))| — individually weighted basis components
+
+        Each basis contribution kᵢ·φᵢ(x̃) shows how much that nonlinear
+        component contributes to the reconstruction.
+
+        If class-specific fit active and snr_db provided → routes per bucket
+        for both x̂ and the per-basis weights kᵢ.
+        """
+        self._check_fitted()
+        x_hat = self.reconstruct(noisy_signal, snr_db=snr_db)  # [T]
+        phi = self.compute_basis(noisy_signal)                  # [S, T]
+
+        # Select K per bucket if class-specific and snr_db provided
+        if self.K_bins is not None and snr_db is not None:
+            b = self.bucket_for_snr(float(snr_db))
+            K_use = self.K_bins[b]
+        else:
+            K_use = self.K
+
+        nperseg = self.stft_params.get('nperseg', 32)
+        noverlap = self.stft_params.get('noverlap', 16)
+        fs = self.stft_params.get('fs', 8192)
+
+        # Channel 0: DSGE reconstruction
+        _, _, Zxx_hat = stft(x_hat, fs=fs, nperseg=nperseg, noverlap=noverlap)
+        mags = [np.abs(Zxx_hat)]
+
+        # Channels 1..S: weighted basis components
+        for i in range(self.S):
+            weighted = K_use[i] * phi[i]  # kᵢ·φᵢ(x̃)
+            _, _, Zxx_i = stft(weighted, fs=fs, nperseg=nperseg, noverlap=noverlap)
+            mags.append(np.abs(Zxx_i))
+
+        return np.array(mags)  # [1+S, F, T']
 
     # ──────────────────────────────────────────────────
     #  check_generating_element_norm

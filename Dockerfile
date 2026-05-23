@@ -12,9 +12,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy only requirements.txt first to leverage Docker cache
 COPY requirements.txt .
+COPY requirements-cuda.txt .
 
 # Install dependencies and clean up pip cache
 RUN pip install --no-cache-dir -r requirements.txt && \
+    rm -rf /root/.cache/pip
+RUN pip install --no-cache-dir -r requirements-cuda.txt && \
     rm -rf /root/.cache/pip
 
 # Copy the rest of the project (uses .dockerignore to skip unnecessary files)
