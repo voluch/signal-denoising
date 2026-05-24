@@ -260,6 +260,8 @@ class UnetAutoencoderTrainer:
             out_mag = out.get("out_mag")
             if out_mag is None and "mask" in out:
                 out_mag = out["mask"] * mag_noisy
+            if out_mag is None and "out_spec" in out:
+                out_mag = out["out_spec"].abs()
             
             if self.loss_name == "mse":
                 loss = F.mse_loss(out_mag, mag_clean)
