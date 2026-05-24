@@ -18,8 +18,8 @@ from train.compare_report import run_compare_report
 
 def main():
     parser = argparse.ArgumentParser(description="Run U-Net experiment suite")
-    parser.add_argument("--dataset", required=True)
-    parser.add_argument("--config", required=True, help="Path to experiment config JSON")
+    parser.add_argument("--dataset", required=False, default=os.getenv("DATASET_NAME"))
+    parser.add_argument("--config", required=False, default=os.getenv("CONFIG_PATH", "train/unet_experiment_configs/core_v1.json"), help="Path to experiment config JSON")
     parser.add_argument("--noise-types", default="non_gaussian")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
@@ -27,6 +27,10 @@ def main():
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--partial-train", type=float, default=1.0)
     args = parser.parse_args()
+
+    if not args.dataset:
+        print("ERROR: --dataset is required (or DATASET_NAME env var)")
+        sys.exit(1)
 
     dataset_dir = Path(args.dataset)
     if not dataset_dir.exists():

@@ -25,8 +25,5 @@ COPY . .
 
 # Default command to run the U-Net experiment suite script.
 # Expects a dataset directory mounted to /app/data_generation/datasets/<dataset_name>
-# or similar, or provided via --dataset CLI argument.
+# or similar, or provided via --dataset CLI argument, or DATASET_NAME env var.
 ENTRYPOINT ["python", "train/run_unet_experiment_suite.py"]
-
-# Default argument (optional)
-CMD ["--help"]
