@@ -23,10 +23,10 @@ RUN pip install --no-cache-dir -r requirements-cuda.txt && \
 # Copy the rest of the project (uses .dockerignore to skip unnecessary files)
 COPY . .
 
-# Default command to run the training script.
+# Default command to run the U-Net experiment suite script.
 # Expects a dataset directory mounted to /app/data_generation/datasets/<dataset_name>
 # or similar, or provided via --dataset CLI argument.
-ENTRYPOINT ["python", "train/train_all.py"]
+ENTRYPOINT ["python", "train/run_unet_experiment_suite.py"]
 
 # Default argument (optional)
 CMD ["--help"]

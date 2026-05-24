@@ -28,6 +28,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from train.summarize_unet_experiments import run_summarization
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -366,6 +368,84 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
         if not model_dir.is_dir():
             continue
         name = model_dir.name  # e.g. "UnetAutoencoder_gaussian"
+
+        # Check for experimental config first
+        config_path = model_dir / "experiment_config.json"
+        if config_path.exists():
+            try:
+                with open(config_path) as f:
+                    exp_cfg = json.load(f)
+                noise_type = exp_cfg.get("noise_type", "non_gaussian")
+                model_part = exp_cfg.get("run_id", name)
+                
+                # Load experimental UNet
+                def _load_exp_unet(m_dir, m_cfg, n_ps=128):
+                    import torch
+                    from models.autoencoder_unet import UnetAutoencoder
+                    device = _device()
+                    fs = m_cfg['sample_rate']; sig_len = m_cfg['block_size']
+                    # Use params from exp_cfg if available
+                    n_ps = exp_cfg.get("nperseg", n_ps)
+                    n_ov = exp_cfg.get("noverlap", n_ps * 3 // 4)
+                    stft, istft = _torch_stft_helpers(n_ps, n_ov, sig_len, device)
+                    
+                    # Estimate input shape
+                    dummy_spec, _ = stft(np.zeros((1, sig_len), dtype=np.float32))
+                    f_bins, t_frames = dummy_spec.shape[-2], dummy_spec.shape[-1]
+                    
+                    in_ch = 1
+                    if exp_cfg.get("input_domain") in ["real_imag", "real_imag_mag"]:
+                        in_ch = 2 if exp_cfg.get("input_domain") == "real_imag" else 3
+
+                    model = UnetAutoencoder(
+                        input_shape=(f_bins, t_frames),
+                        in_channels=in_ch,
+                        pooling_mode=exp_cfg.get("pooling_mode", "isotropic"),
+                        output_mode=exp_cfg.get("output_mode", "mask_sigmoid"),
+                    ).to(device)
+                    model.load_state_dict(torch.load(m_dir / 'model_best_snr.pth', map_location=device))
+                    model.eval()
+
+                    def denoise(noisy):
+                        t_noisy = torch.tensor(noisy, device=device)
+                        from train.training_uae import UnetAutoencoderTrainer
+                        # We need a dummy trainer to use its preprocessing or just reimplement
+                        # Reimplementing minimal preprocessing
+                        spec = stft(noisy)[0] # complex [N, F, T']
+                        mag = spec.abs().unsqueeze(1)
+                        
+                        domain = exp_cfg.get("input_domain", "mag")
+                        if domain == "mag": x_in = mag
+                        elif domain == "log1p_mag": x_in = torch.log1p(mag)
+                        elif domain == "real_imag": x_in = torch.stack([spec.real, spec.imag], dim=1)
+                        elif domain == "real_imag_mag": x_in = torch.stack([spec.real, spec.imag, mag.squeeze(1)], dim=1)
+                        else: x_in = mag
+                        
+                        with torch.no_grad():
+                            out = model(x_in, noisy_mag=mag, noisy_spec=spec)
+                        
+                        if "out_spec" in out:
+                            return istft(out["out_spec"].squeeze(1)).cpu().numpy()
+                        else:
+                            out_mag = out.get("out_mag", (out["mask"] * mag if "mask" in out else mag))
+                            phase = spec / (spec.abs() + 1e-8)
+                            return istft(out_mag.squeeze(1) * phase).cpu().numpy()
+                    return denoise
+
+                fn = _load_exp_unet(model_dir, cfg, nperseg)
+                entries[name] = {
+                    'denoise_fn':  fn,
+                    'model_class': 'UnetAutoencoder',
+                    'noise_type':  noise_type,
+                    'is_hybrid':   False,
+                    'dsge_basis':  None,
+                    'dsge_order':  None,
+                    'run_dir':     model_dir,
+                }
+                print(f"  Loaded Experimental UNet: {name}")
+                continue
+            except Exception as e:
+                print(f"  [warn] Failed to load experimental {name}: {e}")
 
         # Parse noise type (last segment is gaussian or non_gaussian)
         noise_type = None
@@ -1147,6 +1227,9 @@ def run_compare_report(run_dir: str | Path, nperseg: int = 128, seed: int = 42):
                        run_path, timestamp, csv_path)
     generate_report_uk(results, entries, figures, dataset_path.name,
                        run_path, timestamp, csv_path)
+
+    print(f'\nRunning U-Net experiment summarization...')
+    run_summarization(run_path, dataset_path)
 
     print(f'\n✅ Done. Output saved to: {run_path}')
     return True

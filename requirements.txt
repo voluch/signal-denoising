@@ -28,3 +28,5 @@ python-dotenv==1.0.1
 wandb==0.19.11
 boto3==1.42.78
 runpod==1.8.2
+pandas
+seaborn

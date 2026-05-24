@@ -2,6 +2,9 @@ import argparse
 import json
 import sys
 import uuid
+import time
+import os
+import gc
 from datetime import datetime
 from pathlib import Path
 
@@ -14,12 +17,13 @@ load_dotenv(ROOT / ".env")
 
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
 try:
     import wandb
-    import os
     WANDB_OK = True
 except ImportError:
     WANDB_OK = False
@@ -33,46 +37,18 @@ from train.snr_curve import evaluate_per_snr, print_snr_table, plot_snr_curve, l
 
 MODEL_NAME = 'UnetAutoencoder'
 
-
-# ── Compatibility helpers for compare_report.py ─────────────────────────────
-# compare_report.py historically imported these from train.training_uae.
-# Keep them here to avoid breaking reporting scripts.
-def stft_mag_phase(x: np.ndarray, fs: int, nperseg: int, noverlap: int, pad: int = 0):
-    """Return (magnitude, phase) for a single 1D signal using scipy STFT."""
-    from scipy.signal import stft as _stft
-
-    if pad > 0:
-        x = np.pad(x, (pad, pad), mode="reflect")
-    _, _, Zxx = _stft(x, fs=fs, nperseg=nperseg, noverlap=noverlap, boundary=None)
-    return np.abs(Zxx).astype(np.float32), np.angle(Zxx).astype(np.float32)
-
-
-def istft_from_mag_phase(
-    mag: np.ndarray,
-    phase: np.ndarray,
-    fs: int,
-    nperseg: int,
-    noverlap: int,
-    pad: int,
-    signal_len: int,
-):
-    """Inverse STFT for one sample; crops reflect padding and ensures signal_len."""
-    from scipy.signal import istft as _istft
-
-    Z = mag * np.exp(1j * phase)
-    _, x_rec = _istft(Z, fs=fs, nperseg=nperseg, noverlap=noverlap, input_onesided=True, boundary=None)
-    if pad > 0 and len(x_rec) >= 2 * pad:
-        x_rec = x_rec[pad: -pad]
-    x_rec = x_rec[:signal_len] if len(x_rec) >= signal_len else np.pad(x_rec, (0, signal_len - len(x_rec)))
-    return x_rec.astype(np.float32)
-
+def negative_snr_loss(pred, target, eps=1e-8):
+    """Time-domain SNR loss (negative to minimize)."""
+    noise = pred - target
+    signal_power = torch.mean(target ** 2, dim=1) + eps
+    noise_power = torch.mean(noise ** 2, dim=1) + eps
+    return -10.0 * torch.log10(signal_power / noise_power).mean()
 
 def _stft_mag_torch(x: torch.Tensor, nperseg: int, noverlap: int) -> torch.Tensor:
     hop = nperseg - noverlap
     win = torch.hann_window(nperseg, periodic=True, device=x.device, dtype=x.dtype)
     return torch.abs(torch.stft(x, n_fft=nperseg, hop_length=hop, win_length=nperseg,
                                 window=win, center=True, return_complex=True))
-
 
 def multi_res_stft_loss(x_hat: torch.Tensor, x: torch.Tensor,
                         configs=((32, 16), (64, 32), (16, 8))) -> torch.Tensor:
@@ -86,13 +62,20 @@ def multi_res_stft_loss(x_hat: torch.Tensor, x: torch.Tensor,
         total = total + l1 + 0.5 * sc
     return total / len(configs)
 
-
 class UnetAutoencoderTrainer:
     def __init__(self, dataset_path: Path, noise_type="non_gaussian",
-                 batch_size=512, epochs=30, learning_rate=3e-4,
-                 signal_len=256, fs=8192, nperseg=128, noverlap=96, random_state=42,
-                 wandb_project="", device=None, data_fraction=1.0, output_dir=None,
-                 run_id: str | None = None):
+                 batch_size=512, epochs=50, learning_rate=1e-3,
+                 signal_len=1024, fs=8192, nperseg=128, noverlap=None, hop_length=32,
+                 random_state=42, wandb_project="", device=None, data_fraction=1.0, 
+                 output_dir=None, run_id: str | None = None,
+                 # New experiment parameters
+                 input_domain="mag", output_mode="mask_sigmoid", mask_max=1.0, softplus_max=3.0,
+                 pooling_mode="isotropic", loss_profile="mag", loss_name="mse",
+                 time_loss_weight=1.0, mrstft_loss_weight=1.0, snr_loss_weight=1.0,
+                 checkpoint_metric="val_snr", scheduler_metric="val_snr",
+                 min_epochs=25, early_stop_patience=15, weight_decay=1e-4, grad_clip_norm=1.0,
+                 save_every_epoch=False):
+        
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
         self.batch_size = batch_size
@@ -101,12 +84,17 @@ class UnetAutoencoderTrainer:
         self.signal_len = signal_len
         self.fs = fs
         self.nperseg = nperseg
-        self.noverlap = nperseg * 3 // 4   # 75% overlap (Hann COLA satisfied)
-        self.pad = nperseg // 2
+        
+        if hop_length is not None:
+            self.noverlap = nperseg - hop_length
+        else:
+            self.noverlap = noverlap if noverlap is not None else (nperseg * 3 // 4)
+        
         self.random_state = random_state
         from train.repro_utils import set_global_seed
         set_global_seed(random_state)
         self.data_fraction = data_fraction
+        
         self.output_dir = Path(output_dir) if output_dir is not None else None
         from train.device_utils import get_device
         self.device = get_device(device)
@@ -114,9 +102,27 @@ class UnetAutoencoderTrainer:
         self.run_id = run_id or uuid.uuid4().hex[:8]
         self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
+        
+        # Experiment params
+        self.input_domain = input_domain
+        self.output_mode = output_mode
+        self.mask_max = mask_max
+        self.softplus_max = softplus_max
+        self.pooling_mode = pooling_mode
+        self.loss_profile = loss_profile
+        self.loss_name = loss_name
+        self.time_loss_weight = time_loss_weight
+        self.mrstft_loss_weight = mrstft_loss_weight
+        self.snr_loss_weight = snr_loss_weight
+        self.checkpoint_metric = checkpoint_metric
+        self.scheduler_metric = scheduler_metric
+        self.min_epochs = min_epochs
+        self.early_stop_patience = early_stop_patience
+        self.weight_decay = weight_decay
+        self.grad_clip_norm = grad_clip_norm
+        self.save_every_epoch = save_every_epoch
 
         if WANDB_OK and wandb_project:
-            # Login if not already logged in
             if not wandb.api.api_key:
                 api_key = os.getenv("WANDB_API_KEY")
                 if api_key:
@@ -126,22 +132,34 @@ class UnetAutoencoderTrainer:
             wandb.init(project=wandb_project, name=run_name, reinit=True, config={
                 "model": MODEL_NAME, "noise_type": noise_type,
                 "epochs": epochs, "batch_size": batch_size, "learning_rate": learning_rate,
-                "random_state": random_state, "fs": fs, "nperseg": nperseg,
-                "dataset": self.dataset_path.name,
-                "run_id": self.run_id,
+                "random_state": random_state, "fs": fs, "nperseg": nperseg, "hop_length": hop_length,
+                "dataset": self.dataset_path.name, "run_id": self.run_id,
+                "input_domain": input_domain, "output_mode": output_mode,
+                "pooling_mode": pooling_mode, "loss_profile": loss_profile,
+                "checkpoint_metric": checkpoint_metric, "scheduler_metric": scheduler_metric,
             })
             print(f"[W&B] Logging enabled → project='{wandb_project}', run='{run_name}'")
         else:
-            reason = "wandb not installed" if not WANDB_OK else "no --wandb-project given"
-            print(f"[W&B] Logging disabled ({reason})")
+            print(f"[W&B] Logging disabled")
 
         self.train_loader, self.val_loader, self.test_loader, self.input_shape = self._load_data()
-        self.model = UnetAutoencoder(self.input_shape).to(self.device)
-
-    # ── STFT helpers (GPU-batched, no scipy) ──────────────────────────────────
+        
+        # Determine in_channels based on input_domain
+        in_channels = 1
+        if input_domain in ["real_imag", "real_imag_mag"]:
+            in_channels = 2 if input_domain == "real_imag" else 3
+            
+        self.model = UnetAutoencoder(
+            input_shape=self.input_shape,
+            in_channels=in_channels,
+            out_channels=1, # mag output usually
+            pooling_mode=pooling_mode,
+            output_mode=output_mode,
+            mask_max=mask_max,
+            softplus_max=softplus_max,
+        ).to(self.device)
 
     def _stft_batch(self, x: torch.Tensor) -> torch.Tensor:
-        """[B, T] → complex [B, F, T'] — Hann window, center=True."""
         win = torch.hann_window(self.nperseg, device=x.device)
         return torch.stft(x, n_fft=self.nperseg,
                           hop_length=self.nperseg - self.noverlap,
@@ -150,22 +168,26 @@ class UnetAutoencoderTrainer:
                           onesided=True, return_complex=True)
 
     def _istft_batch(self, spec: torch.Tensor) -> torch.Tensor:
-        """complex [B, F, T'] → [B, signal_len]"""
         win = torch.hann_window(self.nperseg, device=spec.device)
         return torch.istft(spec, n_fft=self.nperseg,
                            hop_length=self.nperseg - self.noverlap,
                            win_length=self.nperseg, window=win,
                            center=True, onesided=True, length=self.signal_len)
 
-    # ── data ──────────────────────────────────────────────────────────────────
-
-    def _precompute_stft_mag(self, signals: np.ndarray, chunk_size: int = 50000) -> torch.Tensor:
-        """Precompute STFT magnitudes on CPU in chunks. [N, T] → [N, 1, F, T']."""
-        chunks = []
-        for i in range(0, len(signals), chunk_size):
-            x = torch.tensor(signals[i:i + chunk_size], dtype=torch.float32)
-            chunks.append(self._stft_batch(x).abs().unsqueeze(1))
-        return torch.cat(chunks)
+    def _preprocess_input(self, noisy_raw: torch.Tensor) -> torch.Tensor:
+        spec = self._stft_batch(noisy_raw)
+        mag = spec.abs().unsqueeze(1)
+        
+        if self.input_domain == "mag":
+            return mag
+        elif self.input_domain == "log1p_mag":
+            return torch.log1p(mag)
+        elif self.input_domain == "real_imag":
+            return torch.stack([spec.real, spec.imag], dim=1)
+        elif self.input_domain == "real_imag_mag":
+            return torch.stack([spec.real, spec.imag, mag.squeeze(1)], dim=1)
+        else:
+            return mag
 
     def _load_data(self):
         noisy = np.load(self.dataset_path / "train" / f"{self.noise_type}_signals.npy")
@@ -173,25 +195,20 @@ class UnetAutoencoderTrainer:
         if self.data_fraction < 1.0:
             n = max(1, int(len(noisy) * self.data_fraction))
             noisy, clean = noisy[:n], clean[:n]
-        assert noisy.shape[1] == self.signal_len, \
-            f"Signal length mismatch: expected {self.signal_len}, got {noisy.shape[1]}"
-
-        # Precompute STFT magnitudes on CPU (one-time cost, eliminates STFT from training loop)
-        print("  Precomputing STFT magnitudes on CPU …")
-        noisy_mag = self._precompute_stft_mag(noisy)
-        clean_mag = self._precompute_stft_mag(clean)
-        input_shape = (int(noisy_mag.shape[2]), int(noisy_mag.shape[3]))
-        print(f"  Done: {noisy_mag.shape} per set, "
-              f"{2 * noisy_mag.nelement() * 4 / 1e9:.1f} GB total")
-
+        
         noisy_raw = torch.tensor(noisy, dtype=torch.float32)
         clean_raw = torch.tensor(clean, dtype=torch.float32)
 
-        dataset = TensorDataset(noisy_mag, clean_mag, noisy_raw, clean_raw)
+        # Get input shape from a dummy STFT
+        dummy_spec = self._stft_batch(noisy_raw[:1])
+        input_shape = (dummy_spec.shape[1], dummy_spec.shape[2])
+
+        dataset = TensorDataset(noisy_raw, clean_raw)
         total = len(dataset)
-        val_len  = int(0.25 * total)
+        val_len = int(0.25 * total)
         test_len = int(0.25 * total)
         train_len = total - val_len - test_len
+        
         train_set, val_set, test_set = random_split(
             dataset, [train_len, val_len, test_len],
             generator=torch.Generator().manual_seed(self.random_state),
@@ -205,245 +222,278 @@ class UnetAutoencoderTrainer:
             input_shape,
         )
 
-    # ── inference ─────────────────────────────────────────────────────────────
-
-    def denoise_numpy(self, noisy: np.ndarray) -> np.ndarray:
-        """[N, T] → [N, T], batched STFT → mask → ISTFT."""
+    def denoise_batch(self, noisy_raw: torch.Tensor) -> torch.Tensor:
         self.model.eval()
-        x = torch.tensor(noisy, dtype=torch.float32, device=self.device)
-        spec = self._stft_batch(x)
-        mag = spec.abs().unsqueeze(1)
         with torch.no_grad():
-            out_mag = self.model(mag) * mag
-        phase = spec / (spec.abs() + 1e-8)
-        out_spec = out_mag.squeeze(1) * phase
-        return self._istft_batch(out_spec).cpu().numpy()
+            x = self._preprocess_input(noisy_raw)
+            spec = self._stft_batch(noisy_raw)
+            mag = spec.abs().unsqueeze(1)
+            
+            out = self.model(x, noisy_mag=mag, noisy_spec=spec)
+            
+            if "out_spec" in out:
+                return self._istft_batch(out["out_spec"].squeeze(1))
+            elif "out_mag" in out:
+                phase = spec / (spec.abs() + 1e-8)
+                out_spec = out["out_mag"].squeeze(1) * phase
+                return self._istft_batch(out_spec)
+            else:
+                return noisy_raw
 
-    # ── validation ────────────────────────────────────────────────────────────
+    def _get_loss(self, noisy_raw, clean_raw):
+        x_in = self._preprocess_input(noisy_raw)
+        spec_noisy = self._stft_batch(noisy_raw)
+        mag_noisy = spec_noisy.abs().unsqueeze(1)
+        
+        spec_clean = self._stft_batch(clean_raw)
+        mag_clean = spec_clean.abs().unsqueeze(1)
+        
+        out = self.model(x_in, noisy_mag=mag_noisy, noisy_spec=spec_noisy)
+        
+        # Base spectral loss
+        if self.loss_profile in ["mag", "mag_time", "mag_time_mrstft", "snr_aux"]:
+            out_mag = out.get("out_mag")
+            if out_mag is None and "mask" in out:
+                out_mag = out["mask"] * mag_noisy
+            
+            if self.loss_name == "mse":
+                loss = F.mse_loss(out_mag, mag_clean)
+            elif self.loss_name == "l1":
+                loss = F.l1_loss(out_mag, mag_clean)
+            elif self.loss_name == "huber":
+                loss = F.huber_loss(out_mag, mag_clean)
+            else:
+                loss = F.mse_loss(out_mag, mag_clean)
+        elif self.loss_profile == "complex_time":
+            out_spec = out["out_spec"]
+            # Complex STFT loss
+            loss = F.mse_loss(torch.view_as_real(out_spec), torch.view_as_real(spec_clean.unsqueeze(1)))
+        elif self.loss_profile == "time_mrstft":
+            loss = 0.0 # Will be handled by time domain losses
+        else:
+            loss = 0.0
 
-    def _compute_val_snr(self) -> float:
-        all_true, all_pred = [], []
-        for _nm, _cm, noisy_raw, clean_raw in tqdm(self.val_loader, desc="  val SNR", leave=False, unit="batch"):
-            all_pred.append(self.denoise_numpy(noisy_raw.numpy()))
-            all_true.append(clean_raw.numpy())
-        return float(SignalToNoiseRatio.calculate(
-            np.concatenate(all_true), np.concatenate(all_pred)
-        ))
+        # Time domain losses
+        if self.loss_profile in ["mag_time", "mag_time_mrstft", "time_mrstft", "complex_time", "snr_aux"]:
+            if "out_spec" in out:
+                out_wave = self._istft_batch(out["out_spec"].squeeze(1))
+            else:
+                out_mag = out.get("out_mag")
+                if out_mag is None and "mask" in out:
+                    out_mag = out["mask"] * mag_noisy
+                phase_noisy = spec_noisy / (mag_noisy.squeeze(1) + 1e-8)
+                out_wave = self._istft_batch(out_mag.squeeze(1) * phase_noisy)
+            
+            if self.loss_profile != "snr_aux" or self.time_loss_weight > 0:
+                loss += self.time_loss_weight * F.mse_loss(out_wave, clean_raw)
+            
+            if "mrstft" in self.loss_profile:
+                loss += self.mrstft_loss_weight * multi_res_stft_loss(out_wave, clean_raw)
+            
+            if self.loss_profile == "snr_aux":
+                loss += self.snr_loss_weight * negative_snr_loss(out_wave, clean_raw)
 
-    def _compute_val_loss(self, loss_fn) -> float:
-        self.model.eval()
-        total = 0.0
-        with torch.no_grad():
-            for noisy_mag, clean_mag, _, _ in tqdm(self.val_loader, desc="  val loss", leave=False, unit="batch"):
-                nm_t = noisy_mag.to(self.device)
-                cm_t = clean_mag.to(self.device)
-                total += loss_fn(self.model(nm_t) * nm_t, cm_t).item()
-        return total / len(self.val_loader)
-
-    # ── training loop ─────────────────────────────────────────────────────────
+        return loss
 
     def train(self) -> dict:
-        import time
         start_time = time.time()
-
-        print(f"\nTraining Configuration for {MODEL_NAME}:")
-        print(f"  Noise Type:   {self.noise_type}")
-        print(f"  Batch Size:   {self.batch_size}")
-        print(f"  Epochs:       {self.epochs}")
-        print(f"  Learn Rate:   {self.lr}")
-        print(f"  Device:       {self.device}")
-        print(f"  Signal Len:   {self.signal_len}")
-        print(f"  STFT nperseg: {self.nperseg}")
-        print(f"  STFT noverlap:{self.noverlap}")
-        print(f"  Random Seed:  {self.random_state}")
-        print(f"  Data Frac:    {self.data_fraction}")
-
-        optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=1e-4)
-        loss_fn = select_loss(self.noise_type)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode="min",  # monitor SNR
-            patience=5,
-            factor=0.5,
-            threshold=0.02,  # dB
-            threshold_mode="abs",
-            cooldown=2,
-            min_lr=1e-5,
-        )
+        print(f"\n🚀 Training UNet Experiment: {self.run_id}")
+        
+        optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        
+        if self.scheduler_metric == "val_snr":
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="max", patience=5, factor=0.5, threshold=0.02, threshold_mode="abs", cooldown=2, min_lr=1e-5
+            )
+        else:
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode="min", patience=5, factor=0.5, cooldown=2, min_lr=1e-5
+            )
 
         best_val_loss = float("inf")
         best_val_snr  = float("-inf")
-        best_sd = None
         train_history, val_snr_history = [], []
         no_improve = 0
-        early_stop_patience = 999
-        min_epochs=25
+        
+        # Checkpoint directory
+        if self.output_dir:
+            run_dir = self.output_dir
+        else:
+            run_dir = self.dataset_path / "runs" / f"unet_exp_{self.run_date}_{self.run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
 
         for epoch in range(1, self.epochs + 1):
             self.model.train()
             epoch_loss = 0.0
-            from train.device_utils import reset_peak_memory
-            reset_peak_memory(self.device)
-
-            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}/{self.epochs}", leave=False, unit="batch")
-            for noisy_mag, clean_mag, _, _ in pbar:
-                nm_t = noisy_mag.to(self.device)
-                cm_t = clean_mag.to(self.device)
-                loss = loss_fn(self.model(nm_t) * nm_t, cm_t)
-
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch:02d}", leave=False)
+            for noisy_raw, clean_raw in pbar:
+                noisy_raw, clean_raw = noisy_raw.to(self.device), clean_raw.to(self.device)
+                loss = self._get_loss(noisy_raw, clean_raw)
+                
                 optimizer.zero_grad()
                 loss.backward()
+                if self.grad_clip_norm > 0:
+                    nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
                 optimizer.step()
                 epoch_loss += loss.item()
                 pbar.set_postfix(loss=f"{loss.item():.5f}")
 
-            from train.device_utils import format_vram_str
-            vram_str = format_vram_str(self.device)
-
-            val_loss = self._compute_val_loss(loss_fn)
-            val_snr  = self._compute_val_snr()
-
-            scheduler.step(val_loss)
+            # Validation
+            self.model.eval()
+            val_loss = 0.0
+            all_true, all_pred = [], []
+            with torch.no_grad():
+                for noisy_raw, clean_raw in self.val_loader:
+                    noisy_raw_dev, clean_raw_dev = noisy_raw.to(self.device), clean_raw.to(self.device)
+                    val_loss += self._get_loss(noisy_raw_dev, clean_raw_dev).item()
+                    
+                    pred = self.denoise_batch(noisy_raw_dev).cpu().numpy()
+                    all_pred.append(pred)
+                    all_true.append(clean_raw.numpy())
+            
+            val_loss /= len(self.val_loader)
+            val_snr = float(SignalToNoiseRatio.calculate(np.concatenate(all_true), np.concatenate(all_pred)))
+            
+            if self.scheduler_metric == "val_snr":
+                scheduler.step(val_snr)
+            else:
+                scheduler.step(val_loss)
+            
             lr_now = optimizer.param_groups[0]['lr']
-
+            print(f"Epoch {epoch:02d} | loss={epoch_loss/len(self.train_loader):.5f} | val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB | lr={lr_now:.2e}")
+            
             if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
-                wandb.log({
-                    "train/mse_loss": epoch_loss / len(self.train_loader),
-                    "val/mse_loss":   val_loss,
-                    "val/snr_db":     val_snr,
-                    "train/lr":       lr_now,
-                }, step=epoch)
+                wandb.log({"train/loss": epoch_loss/len(self.train_loader), "val/loss": val_loss, "val/snr": val_snr, "lr": lr_now}, step=epoch)
 
-            print(f"Epoch {epoch:02d}/{self.epochs} | "
-                  f"train={epoch_loss / len(self.train_loader):.5f} | "
-                  f"val_loss={val_loss:.5f} | val_SNR={val_snr:.2f} dB | "
-                  f"lr={lr_now:.2e}{vram_str}")
-
-            train_history.append(epoch_loss / len(self.train_loader))
-            val_snr_history.append(val_snr)
-
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                best_val_snr  = val_snr
-                best_sd = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+            # Checkpointing
+            if val_snr > best_val_snr:
+                best_val_snr = val_snr
+                torch.save(self.model.state_dict(), run_dir / "model_best_snr.pth")
                 no_improve = 0
             else:
                 no_improve += 1
-                if no_improve >= early_stop_patience:
-                    print(f"  Early stopping: no improvement for {early_stop_patience} epochs")
-                    break
+                
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save(self.model.state_dict(), run_dir / "model_best_loss.pth")
 
-            if epoch >= min_epochs and no_improve >= early_stop_patience:
-                print(f"Early stopping: no SNR improvement for {early_stop_patience} epochs")
+            if self.save_every_epoch:
+                torch.save(self.model.state_dict(), run_dir / f"model_epoch_{epoch}.pth")
+            
+            torch.save(self.model.state_dict(), run_dir / "model_last.pth")
+            
+            train_history.append(epoch_loss / len(self.train_loader))
+            val_snr_history.append(val_snr)
+
+            if epoch >= self.min_epochs and no_improve >= self.early_stop_patience:
+                print(f"Early stopping at epoch {epoch}")
                 break
 
-        # ── save ──────────────────────────────────────────────────────────────
-        if self.output_dir is not None:
-            run_dir = self.output_dir / f"{MODEL_NAME}_{self.noise_type}"
-        else:
-            run_dir = self.dataset_path / "runs" / f"run_{self.run_date}_{self.run_id}_{MODEL_NAME}_{self.noise_type}"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        save_path = run_dir / "model_best.pth"
-        save_training_curves(
-            train_history, val_snr_history,
-            run_dir / "figures" / "training_curves.png",
-            MODEL_NAME, self.noise_type,
-        )
-        torch.save(best_sd, save_path)
-        print(f"✅ Best model saved → {save_path}")
-        self.model.load_state_dict(best_sd)
-
-        # ── test metrics ──────────────────────────────────────────────────────
+        # Final evaluation
+        self.model.load_state_dict(torch.load(run_dir / "model_best_snr.pth"))
         test_metrics = self._evaluate_test()
-
-        # ── per-SNR curves ────────────────────────────────────────────────────
+        
+        # Per-SNR curves
         per_snr = {}
         test_dir = self.dataset_path / "test"
         if test_dir.exists():
-            per_snr = evaluate_per_snr(self.denoise_numpy, test_dir, self.noise_type, batch_size=self.batch_size)
-            print_snr_table(per_snr, MODEL_NAME)
-            plot_snr_curve(
-                per_snr, MODEL_NAME,
-                save_path=run_dir / "figures" / "snr_curve.png",
-            )
-            log_snr_curve_wandb(per_snr, MODEL_NAME)
+            per_snr = evaluate_per_snr(lambda x: self.denoise_batch(torch.tensor(x, device=self.device)).cpu().numpy(), test_dir, self.noise_type, batch_size=self.batch_size)
+            plot_snr_curve(per_snr, MODEL_NAME, save_path=run_dir / "figures" / "snr_curve.png")
+            save_training_curves(train_history, val_snr_history, run_dir / "figures" / "training_curves.png", MODEL_NAME, self.noise_type)
+
+        # Save experiment config
+        exp_config = {
+            "run_id": self.run_id,
+            "dataset": self.dataset_path.name,
+            "noise_type": self.noise_type,
+            "input_domain": self.input_domain,
+            "output_mode": self.output_mode,
+            "pooling_mode": self.pooling_mode,
+            "loss_profile": self.loss_profile,
+            "val_snr": best_val_snr,
+            "test_snr": test_metrics.get("SNR"),
+        }
+        with open(run_dir / "experiment_config.json", "w") as f:
+            json.dump(exp_config, f, indent=2)
 
         if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
             wandb.finish()
 
-        elapsed = time.time() - start_time
-        print(f"\n" + "=" * 60)
-        print(f"🏁 TRAINING FINISHED: {MODEL_NAME} ({self.noise_type})")
-        print(f"   Total Time: {elapsed // 60:.0f}m {elapsed % 60:.1f}s")
-        print(f"   Best Val SNR: {best_val_snr:.2f} dB")
-        if test_metrics:
-            m_str = " | ".join([f"{k}: {v:.6f}" if k != "SNR" else f"{k}: {v:.2f} dB" for k, v in test_metrics.items()])
-            print(f"   Test Metrics: {m_str}")
-        print("=" * 60 + "\n")
-
         return {
             'model': MODEL_NAME, 'noise_type': self.noise_type,
-            'dataset_uid': self.dataset_uid, 'run_id': self.run_id,
             'val_snr': best_val_snr, 'test_metrics': test_metrics,
-            'per_snr_results': per_snr, 'weights_path': str(save_path),
+            'per_snr_results': per_snr, 'weights_path': str(run_dir / "model_best_snr.pth"),
         }
 
     def _evaluate_test(self) -> dict:
         all_true, all_pred = [], []
-        for _, _, noisy_raw, clean_raw in self.test_loader:
-            all_pred.append(self.denoise_numpy(noisy_raw.numpy()))
+        for noisy_raw, clean_raw in self.test_loader:
+            pred = self.denoise_batch(noisy_raw.to(self.device)).cpu().numpy()
+            all_pred.append(pred)
             all_true.append(clean_raw.numpy())
         y_true = np.concatenate(all_true)
         y_pred = np.concatenate(all_pred)
-        metrics = {
+        return {
             "MSE":  MeanSquaredError.calculate(y_true, y_pred),
             "MAE":  MeanAbsoluteError.calculate(y_true, y_pred),
             "RMSE": RootMeanSquaredError.calculate(y_true, y_pred),
             "SNR":  SignalToNoiseRatio.calculate(y_true, y_pred),
         }
-        if WANDB_OK and hasattr(wandb, 'run') and wandb.run:
-            wandb.log({f"test/{k.lower()}": v for k, v in metrics.items()})
-        print("\n📊 Final Test Metrics (time domain):")
-        for k, v in metrics.items():
-            print(f"  {k}: {v:.2f} dB" if k == "SNR" else f"  {k}: {v:.6f}")
-        return metrics
-
-
-# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Train UNet autoencoder for signal denoising")
-    p.add_argument("--dataset",       required=True)
-    p.add_argument("--noise-type",    default="non_gaussian", choices=["gaussian", "non_gaussian"])
-    p.add_argument("--epochs",        type=int,   default=30)
-    p.add_argument("--batch-size",    type=int,   default=512)
-    p.add_argument("--lr",            type=float, default=1e-4)
-    p.add_argument("--nperseg",       type=int,   default=128)
-    p.add_argument("--seed",          type=int,   default=42)
-    p.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT", ""))
+    p = argparse.ArgumentParser()
+    p.add_argument("--dataset", required=True)
+    p.add_argument("--noise-type", default="non_gaussian")
+    p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--input-domain", default="mag")
+    p.add_argument("--output-mode", default="mask_sigmoid")
+    p.add_argument("--mask-max", type=float, default=1.0)
+    p.add_argument("--softplus-max", type=float, default=3.0)
+    p.add_argument("--pooling-mode", default="isotropic")
+    p.add_argument("--loss-profile", default="mag")
+    p.add_argument("--loss-name", default="mse")
+    p.add_argument("--time-loss-weight", type=float, default=1.0)
+    p.add_argument("--mrstft-loss-weight", type=float, default=1.0)
+    p.add_argument("--snr-loss-weight", type=float, default=1.0)
+    p.add_argument("--checkpoint-metric", default="val_snr")
+    p.add_argument("--scheduler-metric", default="val_snr")
+    p.add_argument("--min-epochs", type=int, default=25)
+    p.add_argument("--early-stop-patience", type=int, default=15)
+    p.add_argument("--weight-decay", type=float, default=1e-4)
+    p.add_argument("--grad-clip-norm", type=float, default=1.0)
+    p.add_argument("--partial-train", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--output-dir", default=None)
+    p.add_argument("--wandb-project", default="")
     args = p.parse_args()
 
-    dataset_path = Path(args.dataset)
-    if not dataset_path.is_absolute():
-        dataset_path = ROOT / dataset_path
-
-    with open(dataset_path / "dataset_config.json") as f:
-        cfg = json.load(f)
-
-    print(f"Dataset: {dataset_path.name}")
-    print(f"Config:  block_size={cfg['block_size']}, sample_rate={cfg['sample_rate']}, "
-          f"noise_type={args.noise_type}")
-
-    UnetAutoencoderTrainer(
-        dataset_path=dataset_path,
+    trainer = UnetAutoencoderTrainer(
+        dataset_path=Path(args.dataset),
         noise_type=args.noise_type,
-        batch_size=args.batch_size,
         epochs=args.epochs,
+        batch_size=args.batch_size,
         learning_rate=args.lr,
-        signal_len=cfg["block_size"],
-        fs=cfg["sample_rate"],
-        nperseg=args.nperseg,
-        noverlap=args.nperseg // 2,
+        input_domain=args.input_domain,
+        output_mode=args.output_mode,
+        mask_max=args.mask_max,
+        softplus_max=args.softplus_max,
+        pooling_mode=args.pooling_mode,
+        loss_profile=args.loss_profile,
+        loss_name=args.loss_name,
+        time_loss_weight=args.time_loss_weight,
+        mrstft_loss_weight=args.mrstft_loss_weight,
+        snr_loss_weight=args.snr_loss_weight,
+        checkpoint_metric=args.checkpoint_metric,
+        scheduler_metric=args.scheduler_metric,
+        min_epochs=args.min_epochs,
+        early_stop_patience=args.early_stop_patience,
+        weight_decay=args.weight_decay,
+        grad_clip_norm=args.grad_clip_norm,
+        data_fraction=args.partial_train,
         random_state=args.seed,
-        wandb_project=args.wandb_project,
-    ).train()
+        output_dir=args.output_dir,
+        wandb_project=args.wandb_project
+    )
+    trainer.train()

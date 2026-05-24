@@ -1,0 +1,28 @@
+[
+  {
+    "exp_id": "baseline",
+    "output_mode": "mask_sigmoid",
+    "pooling_mode": "isotropic",
+    "loss_profile": "mag"
+  },
+  {
+    "exp_id": "scaled_mask",
+    "output_mode": "mask_scaled_sigmoid",
+    "mask_max": 2.0,
+    "pooling_mode": "isotropic",
+    "loss_profile": "mag"
+  },
+  {
+    "exp_id": "time_preserve_pooling",
+    "output_mode": "mask_sigmoid",
+    "pooling_mode": "time_preserve",
+    "loss_profile": "mag"
+  },
+  {
+    "exp_id": "mag_time_loss",
+    "output_mode": "mask_sigmoid",
+    "pooling_mode": "isotropic",
+    "loss_profile": "mag_time",
+    "time_loss_weight": 0.1
+  }
+]
