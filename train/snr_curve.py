@@ -143,6 +143,8 @@ def plot_snr_curve(
     plt.tight_layout()
 
     if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=120)
         print(f"  SNR curve → {save_path}")
 

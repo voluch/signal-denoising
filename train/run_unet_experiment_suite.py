@@ -102,6 +102,7 @@ def main():
                 "--seed", str(args.seed),
                 "--wandb-project", args.wandb_project,
                 "--partial-train", str(args.partial_train),
+                "--run-id", sub_run_id,
             ]
             if args.device:
                 cmd.extend(["--device", args.device])

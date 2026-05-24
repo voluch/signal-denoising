@@ -472,6 +472,7 @@ if __name__ == "__main__":
     p.add_argument("--output-dir", default=None)
     p.add_argument("--wandb-project", default="")
     p.add_argument("--device", default=None)
+    p.add_argument("--run-id", default=None)
     args = p.parse_args()
 
     trainer = UnetAutoencoderTrainer(
@@ -504,6 +505,7 @@ if __name__ == "__main__":
         random_state=args.seed,
         output_dir=args.output_dir,
         wandb_project=args.wandb_project,
-        device=args.device
+        device=args.device,
+        run_id=args.run_id
     )
     trainer.train()
