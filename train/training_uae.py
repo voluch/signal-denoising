@@ -68,6 +68,7 @@ class UnetAutoencoderTrainer:
                  signal_len=1024, fs=8192, nperseg=128, noverlap=None, hop_length=32,
                  random_state=42, wandb_project="", device=None, data_fraction=1.0, 
                  output_dir=None, run_id: str | None = None, exp_id: str | None = None,
+                 description: str | None = None,
                  # New experiment parameters
                  input_domain="mag", output_mode="mask_sigmoid", mask_max=1.0, softplus_max=3.0,
                  pooling_mode="isotropic", loss_profile="mag", loss_name="mse",
@@ -101,6 +102,7 @@ class UnetAutoencoderTrainer:
 
         self.run_id = run_id or uuid.uuid4().hex[:8]
         self.exp_id = exp_id
+        self.description = description
         self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
         
@@ -414,15 +416,32 @@ class UnetAutoencoderTrainer:
         # Save experiment config
         exp_config = {
             "exp_id": self.exp_id,
+            "description": self.description,
             "run_id": self.run_id,
             "dataset": self.dataset_path.name,
+            "dataset_uid": self.dataset_uid,
             "noise_type": self.noise_type,
             "input_domain": self.input_domain,
             "output_mode": self.output_mode,
+            "mask_max": self.mask_max,
+            "softplus_max": self.softplus_max,
             "pooling_mode": self.pooling_mode,
             "loss_profile": self.loss_profile,
+            "loss_name": self.loss_name,
+            "optimizer": self.optimizer_name,
+            "learning_rate": self.lr,
+            "epochs": self.epochs,
+            "batch_size": self.batch_size,
+            "nperseg": self.nperseg,
+            "noverlap": self.noverlap,
+            "hop_length": self.nperseg - self.noverlap,
+            "seed": self.random_state,
+            "checkpoint_metric": self.checkpoint_metric,
+            "scheduler_metric": self.scheduler_metric,
             "val_snr": float(best_val_snr),
             "test_snr": float(test_metrics.get("SNR", 0)),
+            "test_metrics": test_metrics,
+            "timestamp": datetime.now().isoformat(),
         }
         with open(run_dir / "experiment_config.json", "w") as f:
             json.dump(exp_config, f, indent=2)
@@ -485,6 +504,7 @@ if __name__ == "__main__":
     p.add_argument("--device", default=None)
     p.add_argument("--run-id", default=None)
     p.add_argument("--exp-id", default=None)
+    p.add_argument("--description", default=None)
     p.add_argument("--optimizer", default="adamw")
     p.add_argument("--disable-early-stop", action="store_true")
     args = p.parse_args()
@@ -522,6 +542,7 @@ if __name__ == "__main__":
         device=args.device,
         run_id=args.run_id,
         exp_id=args.exp_id,
+        description=args.description,
         optimizer_name=args.optimizer,
         disable_early_stop=args.disable_early_stop
     )
