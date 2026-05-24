@@ -111,7 +111,14 @@ def main():
             for k, v in exp.items():
                 if k == "exp_id": continue
                 arg_name = "--" + k.replace("_", "-")
-                cmd.extend([arg_name, str(v)])
+                if isinstance(v, bool):
+                    if v:
+                        cmd.append(arg_name)
+                else:
+                    cmd.extend([arg_name, str(v)])
+            
+            # Pass exp_id explicitly
+            cmd.extend(["--exp-id", exp_id])
             
             # Set output directory to sub-run dir
             # Note: training_uae.py might need to be updated to handle output-dir correctly

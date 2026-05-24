@@ -67,14 +67,14 @@ class UnetAutoencoderTrainer:
                  batch_size=512, epochs=50, learning_rate=1e-3,
                  signal_len=1024, fs=8192, nperseg=128, noverlap=None, hop_length=32,
                  random_state=42, wandb_project="", device=None, data_fraction=1.0, 
-                 output_dir=None, run_id: str | None = None,
+                 output_dir=None, run_id: str | None = None, exp_id: str | None = None,
                  # New experiment parameters
                  input_domain="mag", output_mode="mask_sigmoid", mask_max=1.0, softplus_max=3.0,
                  pooling_mode="isotropic", loss_profile="mag", loss_name="mse",
                  time_loss_weight=1.0, mrstft_loss_weight=1.0, snr_loss_weight=1.0,
                  checkpoint_metric="val_snr", scheduler_metric="val_snr",
                  min_epochs=25, early_stop_patience=15, weight_decay=1e-4, grad_clip_norm=1.0,
-                 save_every_epoch=False):
+                 save_every_epoch=False, optimizer_name="adamw", disable_early_stop=False):
         
         self.dataset_path = Path(dataset_path)
         self.noise_type = noise_type
@@ -100,6 +100,7 @@ class UnetAutoencoderTrainer:
         self.device = get_device(device)
 
         self.run_id = run_id or uuid.uuid4().hex[:8]
+        self.exp_id = exp_id
         self.run_date = datetime.now().strftime("%Y%m%d")
         self.dataset_uid = self.dataset_path.name.split('_')[-1]
         
@@ -121,6 +122,8 @@ class UnetAutoencoderTrainer:
         self.weight_decay = weight_decay
         self.grad_clip_norm = grad_clip_norm
         self.save_every_epoch = save_every_epoch
+        self.optimizer_name = optimizer_name.lower()
+        self.disable_early_stop = disable_early_stop
 
         if WANDB_OK and wandb_project:
             if not wandb.api.api_key:
@@ -299,7 +302,10 @@ class UnetAutoencoderTrainer:
         start_time = time.time()
         print(f"\n🚀 Training UNet Experiment: {self.run_id}")
         
-        optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        if self.optimizer_name == "adam":
+            optimizer = optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        else:
+            optimizer = optim.AdamW(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
         
         if self.scheduler_metric == "val_snr":
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -385,9 +391,13 @@ class UnetAutoencoderTrainer:
             train_history.append(epoch_loss / len(self.train_loader))
             val_snr_history.append(val_snr)
 
-            if epoch >= self.min_epochs and no_improve >= self.early_stop_patience:
-                print(f"Early stopping at epoch {epoch}")
-                break
+            if not self.disable_early_stop:
+                if epoch >= self.min_epochs and no_improve >= self.early_stop_patience:
+                    print(f"Early stopping at epoch {epoch}")
+                    break
+            else:
+                if epoch >= self.epochs:
+                    break
 
         # Final evaluation
         self.model.load_state_dict(torch.load(run_dir / "model_best_snr.pth"))
@@ -403,6 +413,7 @@ class UnetAutoencoderTrainer:
 
         # Save experiment config
         exp_config = {
+            "exp_id": self.exp_id,
             "run_id": self.run_id,
             "dataset": self.dataset_path.name,
             "noise_type": self.noise_type,
@@ -473,6 +484,9 @@ if __name__ == "__main__":
     p.add_argument("--wandb-project", default="")
     p.add_argument("--device", default=None)
     p.add_argument("--run-id", default=None)
+    p.add_argument("--exp-id", default=None)
+    p.add_argument("--optimizer", default="adamw")
+    p.add_argument("--disable-early-stop", action="store_true")
     args = p.parse_args()
 
     trainer = UnetAutoencoderTrainer(
@@ -506,6 +520,9 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         wandb_project=args.wandb_project,
         device=args.device,
-        run_id=args.run_id
+        run_id=args.run_id,
+        exp_id=args.exp_id,
+        optimizer_name=args.optimizer,
+        disable_early_stop=args.disable_early_stop
     )
     trainer.train()

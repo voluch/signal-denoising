@@ -376,7 +376,8 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                 with open(config_path) as f:
                     exp_cfg = json.load(f)
                 noise_type = exp_cfg.get("noise_type", "non_gaussian")
-                model_part = exp_cfg.get("run_id", name)
+                exp_id = exp_cfg.get("exp_id")
+                run_id_val = exp_cfg.get("run_id")
                 
                 # Load experimental UNet
                 def _load_exp_unet(m_dir, m_cfg, n_ps=128):
@@ -402,6 +403,8 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                         in_channels=in_ch,
                         pooling_mode=exp_cfg.get("pooling_mode", "isotropic"),
                         output_mode=exp_cfg.get("output_mode", "mask_sigmoid"),
+                        mask_max=exp_cfg.get("mask_max", 1.0),
+                        softplus_max=exp_cfg.get("softplus_max", 3.0),
                     ).to(device)
                     model.load_state_dict(torch.load(m_dir / 'model_best_snr.pth', map_location=device))
                     model.eval()
@@ -433,14 +436,20 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                     return denoise
 
                 fn = _load_exp_unet(model_dir, cfg, nperseg)
+                m_class = 'UnetAutoencoder'
+                if exp_id:
+                    m_class = f"UnetAutoencoder_{exp_id}"
+                
                 entries[name] = {
                     'denoise_fn':  fn,
-                    'model_class': 'UnetAutoencoder',
+                    'model_class': m_class,
                     'noise_type':  noise_type,
                     'is_hybrid':   False,
                     'dsge_basis':  None,
                     'dsge_order':  None,
                     'run_dir':     model_dir,
+                    'exp_id':      exp_id,
+                    'run_id':      run_id_val,
                 }
                 print(f"  Loaded Experimental UNet: {name}")
                 continue
@@ -637,8 +646,10 @@ def fig1_snr_heatmap(results: dict, entries: dict, figures_dir: Path) -> Path:
         else:
             row[2] = snr_g; row[3] = snr_ng
         matrix.append(row)
-        short_mc = MODEL_DISPLAY.get(mc, mc[:14])
-        row_labels.append(f"{short_mc}\n({NOISE_SHORT[nt]} train)")
+        short_label = _get_label(name, entries)
+        if len(short_label) > 20:
+             short_label = short_label[:17] + "..."
+        row_labels.append(f"{short_label}\n({NOISE_SHORT[nt]} train)")
 
     if not matrix:
         return None
@@ -675,9 +686,15 @@ def fig2_combined_snr_curves(results: dict, entries: dict, figures_dir: Path) ->
     Gaussian-trained: solid lines. Non-Gaussian-trained: dashed lines.
     """
     plt.rcParams.update(RCPARAMS)
-    base_classes = [mc for mc in BASE_MODELS
-                    if any(entries[n]['model_class'] == mc for n in results)]
-    colors = _model_colors(base_classes)
+    # Find all base and experimental model classes
+    all_mc = []
+    for n in sorted(results):
+        if entries[n]['is_hybrid']: continue
+        mc = entries[n]['model_class']
+        if mc not in all_mc:
+            all_mc.append(mc)
+    
+    colors = _model_colors(all_mc)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=False)
     fig.suptitle('SNR Output vs. SNR Input — All Models (Combined)', fontsize=12)
@@ -701,7 +718,7 @@ def fig2_combined_snr_curves(results: dict, entries: dict, figures_dir: Path) ->
             xs = [per_snr[l]['snr_in_db'] for l in lbls]
             ys = [per_snr[l]['SNR']       for l in lbls]
             snr_ins.extend(xs)
-            label = f"{MODEL_DISPLAY.get(mc, mc)} ({NOISE_SHORT[nt]}. train)"
+            label = f"{_get_label(name, entries)} ({NOISE_SHORT[nt]}. train)"
             ax.plot(xs, ys, lw=1.8, color=colors.get(mc, 'gray'),
                     linestyle=LINE_STYLE[nt], marker='o', markersize=3.5,
                     label=label)
@@ -728,6 +745,9 @@ def _hybrid_sort_key(mc: str) -> tuple:
 def _model_title(mc: str) -> str:
     if mc in MODEL_DISPLAY:
         return MODEL_DISPLAY[mc]
+    for bmc, display in MODEL_DISPLAY.items():
+        if mc.startswith(bmc + "_"):
+            return f"{display} ({mc[len(bmc)+1:].replace('_', ' ')})"
     m = re.match(r'HybridDSGE_UNet_(\w+)_S(\d+)$', mc)
     return f"Hybrid ({m.group(1)}, S{m.group(2)})" if m else mc
 
@@ -745,8 +765,13 @@ def fig3_per_model_comparison(results: dict, entries: dict, figures_dir: Path) -
       Blue solid (NG-train → NG-test) — best case; blue dashed ≈ blue solid = positive result
     """
     plt.rcParams.update(RCPARAMS)
-    base_classes = [mc for mc in BASE_MODELS
-                    if any(entries[n]['model_class'] == mc for n in results)]
+    base_classes = []
+    for n in sorted(results):
+        if entries[n]['is_hybrid']: continue
+        mc = entries[n]['model_class']
+        if mc not in base_classes:
+            base_classes.append(mc)
+            
     hybrid_classes = sorted(
         set(entries[n]['model_class'] for n in results if entries[n]['is_hybrid']),
         key=_hybrid_sort_key,
@@ -778,8 +803,10 @@ def fig3_per_model_comparison(results: dict, entries: dict, figures_dir: Path) -
         snr_ins = []
 
         for train_nt in NOISE_TYPES:
-            name = f'{mc}_{train_nt}'
-            if name not in results:
+            # Find the run name for this (mc, train_nt)
+            name = next((n for n, info in entries.items() 
+                         if info['model_class'] == mc and info['noise_type'] == train_nt), None)
+            if not name or name not in results:
                 continue
             for test_nt in NOISE_TYPES:
                 per_snr = results[name][test_nt]['per_snr']
@@ -915,6 +942,11 @@ def fig5_example_denoising(results: dict, entries: dict,
 
 # ── report generation ─────────────────────────────────────────────────────────
 
+def _get_label(name: str, entries: dict) -> str:
+    mc = entries[name]['model_class']
+    return _model_title(mc)
+
+
 def _snr_table(results: dict, entries: dict) -> list[str]:
     """Markdown table rows for the main SNR comparison."""
     lines = [
@@ -925,10 +957,9 @@ def _snr_table(results: dict, entries: dict) -> list[str]:
     hybrid_runs = [n for n in sorted(results) if entries[n]['is_hybrid']]
     for name in base_runs + hybrid_runs:
         nt  = entries[name]['noise_type']
-        mc  = entries[name]['model_class']
         snr_g  = results[name]['gaussian']['overall'].get('SNR', float('nan'))
         snr_ng = results[name]['non_gaussian']['overall'].get('SNR', float('nan'))
-        label = MODEL_DISPLAY.get(mc, mc[:20])
+        label = _get_label(name, entries)
         def _fmt(v, cond): return f'{v:.2f}' if cond and not np.isnan(v) else '—'
         lines.append(
             f'| {label} | {NOISE_LABEL[nt]} | '
@@ -947,9 +978,9 @@ def _best_overall(results: dict, entries: dict, test_nt: str) -> str:
     if not best:
         return 'N/A'
     snr = results[best][test_nt]['overall']['SNR']
-    mc = entries[best]['model_class']
     nt = entries[best]['noise_type']
-    return f"{MODEL_DISPLAY.get(mc, mc)} (trained on {NOISE_LABEL[nt]}, SNR = {snr:.2f} dB)"
+    label = _get_label(best, entries)
+    return f"{label} (trained on {NOISE_LABEL[nt]}, SNR = {snr:.2f} dB)"
 
 
 def generate_report_en(results: dict, entries: dict, figures: list,
