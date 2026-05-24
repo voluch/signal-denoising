@@ -445,8 +445,12 @@ if __name__ == "__main__":
     p.add_argument("--dataset", required=True)
     p.add_argument("--noise-type", default="non_gaussian")
     p.add_argument("--epochs", type=int, default=50)
-    p.add_argument("--batch-size", type=int, default=512)
+    p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--nperseg", type=int, default=128)
+    p.add_argument("--hop-length", type=int, default=32)
+    p.add_argument("--signal-len", type=int, default=1024)
+    p.add_argument("--fs", type=int, default=8192)
     p.add_argument("--input-domain", default="mag")
     p.add_argument("--output-mode", default="mask_sigmoid")
     p.add_argument("--mask-max", type=float, default=1.0)
@@ -467,6 +471,7 @@ if __name__ == "__main__":
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output-dir", default=None)
     p.add_argument("--wandb-project", default="")
+    p.add_argument("--device", default=None)
     args = p.parse_args()
 
     trainer = UnetAutoencoderTrainer(
@@ -475,6 +480,10 @@ if __name__ == "__main__":
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        signal_len=args.signal_len,
+        fs=args.fs,
+        nperseg=args.nperseg,
+        hop_length=args.hop_length,
         input_domain=args.input_domain,
         output_mode=args.output_mode,
         mask_max=args.mask_max,
@@ -494,6 +503,7 @@ if __name__ == "__main__":
         data_fraction=args.partial_train,
         random_state=args.seed,
         output_dir=args.output_dir,
-        wandb_project=args.wandb_project
+        wandb_project=args.wandb_project,
+        device=args.device
     )
     trainer.train()
