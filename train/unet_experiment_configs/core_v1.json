@@ -1,28 +1,68 @@
 [
   {
-    "exp_id": "baseline",
-    "output_mode": "mask_sigmoid",
-    "pooling_mode": "isotropic",
-    "loss_profile": "mag"
+    "exp_id": "A01_fixed_trainer",
+    "description": "Baseline with SNR-based checkpointing and scheduling"
   },
   {
-    "exp_id": "scaled_mask",
+    "exp_id": "A02_fixed_no_early_stop",
+    "description": "No early stopping for 50 epochs",
+    "disable_early_stop": true
+  },
+  {
+    "exp_id": "B01_mask2",
+    "description": "Scaled sigmoid mask in [0,2]",
     "output_mode": "mask_scaled_sigmoid",
-    "mask_max": 2.0,
-    "pooling_mode": "isotropic",
-    "loss_profile": "mag"
+    "mask_max": 2.0
   },
   {
-    "exp_id": "time_preserve_pooling",
-    "output_mode": "mask_sigmoid",
-    "pooling_mode": "time_preserve",
-    "loss_profile": "mag"
+    "exp_id": "B02_mask3",
+    "description": "Scaled sigmoid mask in [0,3]",
+    "output_mode": "mask_scaled_sigmoid",
+    "mask_max": 3.0
   },
   {
-    "exp_id": "mag_time_loss",
-    "output_mode": "mask_sigmoid",
-    "pooling_mode": "isotropic",
+    "exp_id": "B03_softplus_mask3",
+    "description": "Softplus positive mask capped at 3",
+    "output_mode": "mask_softplus",
+    "softplus_max": 3.0
+  },
+  {
+    "exp_id": "B04_residual_mag",
+    "description": "Predict magnitude residual instead of ratio mask",
+    "output_mode": "residual_mag"
+  },
+  {
+    "exp_id": "C01_mag_time",
+    "description": "Magnitude loss + waveform MSE",
     "loss_profile": "mag_time",
     "time_loss_weight": 0.1
+  },
+  {
+    "exp_id": "C02_mag_time_mrstft",
+    "description": "Magnitude loss + waveform MSE + MR-STFT",
+    "loss_profile": "mag_time_mrstft",
+    "time_loss_weight": 0.1,
+    "mrstft_loss_weight": 0.05
+  },
+  {
+    "exp_id": "D01_hop16",
+    "description": "More time frames (hop=16)",
+    "hop_length": 16
+  },
+  {
+    "exp_id": "D02_aniso_pool",
+    "description": "Preserve time dimension longer with time-preserve pools",
+    "pooling_mode": "time_preserve"
+  },
+  {
+    "exp_id": "E01_log1p_mag",
+    "description": "Train on log1p(mag)",
+    "input_domain": "log1p_mag"
+  },
+  {
+    "exp_id": "F01_complex_crm",
+    "description": "Complex ratio mask with real/imag input",
+    "input_domain": "real_imag",
+    "output_mode": "complex_crm"
   }
 ]
