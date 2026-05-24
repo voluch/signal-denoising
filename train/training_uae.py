@@ -410,8 +410,8 @@ class UnetAutoencoderTrainer:
             "output_mode": self.output_mode,
             "pooling_mode": self.pooling_mode,
             "loss_profile": self.loss_profile,
-            "val_snr": best_val_snr,
-            "test_snr": test_metrics.get("SNR"),
+            "val_snr": float(best_val_snr),
+            "test_snr": float(test_metrics.get("SNR", 0)),
         }
         with open(run_dir / "experiment_config.json", "w") as f:
             json.dump(exp_config, f, indent=2)
@@ -434,10 +434,10 @@ class UnetAutoencoderTrainer:
         y_true = np.concatenate(all_true)
         y_pred = np.concatenate(all_pred)
         return {
-            "MSE":  MeanSquaredError.calculate(y_true, y_pred),
-            "MAE":  MeanAbsoluteError.calculate(y_true, y_pred),
-            "RMSE": RootMeanSquaredError.calculate(y_true, y_pred),
-            "SNR":  SignalToNoiseRatio.calculate(y_true, y_pred),
+            "MSE":  float(MeanSquaredError.calculate(y_true, y_pred)),
+            "MAE":  float(MeanAbsoluteError.calculate(y_true, y_pred)),
+            "RMSE": float(RootMeanSquaredError.calculate(y_true, y_pred)),
+            "SNR":  float(SignalToNoiseRatio.calculate(y_true, y_pred)),
         }
 
 if __name__ == "__main__":

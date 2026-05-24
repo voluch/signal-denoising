@@ -96,10 +96,10 @@ def evaluate_per_snr(
         denoised_all = np.concatenate(chunks, axis=0)
 
         results[snr_label] = {
-            'MSE':       MeanSquaredError.calculate(clean_all, denoised_all),
-            'MAE':       MeanAbsoluteError.calculate(clean_all, denoised_all),
-            'RMSE':      RootMeanSquaredError.calculate(clean_all, denoised_all),
-            'SNR':       SignalToNoiseRatio.calculate(clean_all, denoised_all),
+            'MSE':       float(MeanSquaredError.calculate(clean_all, denoised_all)),
+            'MAE':       float(MeanAbsoluteError.calculate(clean_all, denoised_all)),
+            'RMSE':      float(RootMeanSquaredError.calculate(clean_all, denoised_all)),
+            'SNR':       float(SignalToNoiseRatio.calculate(clean_all, denoised_all)),
             'snr_in_db': _label_to_db(snr_label),
             'n_samples': len(noisy_all),
         }
