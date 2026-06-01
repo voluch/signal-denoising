@@ -28,11 +28,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from train.summarize_unet_experiments import run_summarization
-
+# Add project root to sys.path before importing from local modules
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from train.summarize_unet_experiments import run_summarization
 
 from dotenv import load_dotenv
 load_dotenv(ROOT / ".env")
@@ -338,6 +339,61 @@ def _load_wavelet(run_dir: Path):
     return denoise
 
 
+def _load_exp_unet(m_dir, m_cfg, exp_cfg, n_ps=128):
+    import torch
+    from models.autoencoder_unet import UnetAutoencoder
+    device = _device()
+    fs = m_cfg['sample_rate']; sig_len = m_cfg['block_size']
+    # Use params from exp_cfg if available
+    n_ps = exp_cfg.get("nperseg", n_ps)
+    n_ov = exp_cfg.get("noverlap", n_ps * 3 // 4)
+    stft, istft = _torch_stft_helpers(n_ps, n_ov, sig_len, device)
+    
+    # Estimate input shape
+    dummy_spec, _ = stft(np.zeros((1, sig_len), dtype=np.float32))
+    f_bins, t_frames = dummy_spec.shape[-2], dummy_spec.shape[-1]
+    
+    in_ch = 1
+    if exp_cfg.get("input_domain") in ["real_imag", "real_imag_mag"]:
+        in_ch = 2 if exp_cfg.get("input_domain") == "real_imag" else 3
+
+    model = UnetAutoencoder(
+        input_shape=(f_bins, t_frames),
+        in_channels=in_ch,
+        pooling_mode=exp_cfg.get("pooling_mode", "isotropic"),
+        output_mode=exp_cfg.get("output_mode", "mask_sigmoid"),
+        mask_max=exp_cfg.get("mask_max", 1.0),
+        softplus_max=exp_cfg.get("softplus_max", 3.0),
+    ).to(device)
+    model.load_state_dict(torch.load(m_dir / 'model_best_snr.pth', map_location=device))
+    model.eval()
+
+    def denoise(noisy):
+        from train.training_uae import UnetAutoencoderTrainer
+        # We need a dummy trainer to use its preprocessing or just reimplement
+        # Reimplementing minimal preprocessing
+        spec = stft(noisy)[0] # complex [N, F, T']
+        mag = spec.abs().unsqueeze(1)
+        
+        domain = exp_cfg.get("input_domain", "mag")
+        if domain == "mag": x_in = mag
+        elif domain == "log1p_mag": x_in = torch.log1p(mag)
+        elif domain == "real_imag": x_in = torch.stack([spec.real, spec.imag], dim=1)
+        elif domain == "real_imag_mag": x_in = torch.stack([spec.real, spec.imag, mag.squeeze(1)], dim=1)
+        else: x_in = mag
+        
+        with torch.no_grad():
+            out = model(x_in, noisy_mag=mag, noisy_spec=spec)
+        
+        if "out_spec" in out:
+            return istft(out["out_spec"].squeeze(1)).cpu().numpy()
+        else:
+            out_mag = out.get("out_mag", (out["mask"] * mag if "mask" in out else mag))
+            phase = spec / (spec.abs() + 1e-8)
+            return istft(out_mag.squeeze(1) * phase).cpu().numpy()
+    return denoise
+
+
 # ── run discovery ─────────────────────────────────────────────────────────────
 
 def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
@@ -349,21 +405,7 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
     if not run_dir.exists():
         return {}
 
-    # Pre-populate with all base models so they appear in the report even if missing
     entries = {}
-    for mc in BASE_MODELS:
-        for nt in NOISE_TYPES:
-            name = f"{mc}_{nt}"
-            entries[name] = {
-                'denoise_fn':  None,
-                'model_class': mc,
-                'noise_type':  nt,
-                'is_hybrid':   False,
-                'dsge_basis':  None,
-                'dsge_order':  None,
-                'run_dir':     run_dir / name,
-            }
-
     for model_dir in sorted(run_dir.iterdir()):
         if not model_dir.is_dir():
             continue
@@ -379,63 +421,7 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                 exp_id = exp_cfg.get("exp_id")
                 run_id_val = exp_cfg.get("run_id")
                 
-                # Load experimental UNet
-                def _load_exp_unet(m_dir, m_cfg, n_ps=128):
-                    import torch
-                    from models.autoencoder_unet import UnetAutoencoder
-                    device = _device()
-                    fs = m_cfg['sample_rate']; sig_len = m_cfg['block_size']
-                    # Use params from exp_cfg if available
-                    n_ps = exp_cfg.get("nperseg", n_ps)
-                    n_ov = exp_cfg.get("noverlap", n_ps * 3 // 4)
-                    stft, istft = _torch_stft_helpers(n_ps, n_ov, sig_len, device)
-                    
-                    # Estimate input shape
-                    dummy_spec, _ = stft(np.zeros((1, sig_len), dtype=np.float32))
-                    f_bins, t_frames = dummy_spec.shape[-2], dummy_spec.shape[-1]
-                    
-                    in_ch = 1
-                    if exp_cfg.get("input_domain") in ["real_imag", "real_imag_mag"]:
-                        in_ch = 2 if exp_cfg.get("input_domain") == "real_imag" else 3
-
-                    model = UnetAutoencoder(
-                        input_shape=(f_bins, t_frames),
-                        in_channels=in_ch,
-                        pooling_mode=exp_cfg.get("pooling_mode", "isotropic"),
-                        output_mode=exp_cfg.get("output_mode", "mask_sigmoid"),
-                        mask_max=exp_cfg.get("mask_max", 1.0),
-                        softplus_max=exp_cfg.get("softplus_max", 3.0),
-                    ).to(device)
-                    model.load_state_dict(torch.load(m_dir / 'model_best_snr.pth', map_location=device))
-                    model.eval()
-
-                    def denoise(noisy):
-                        t_noisy = torch.tensor(noisy, device=device)
-                        from train.training_uae import UnetAutoencoderTrainer
-                        # We need a dummy trainer to use its preprocessing or just reimplement
-                        # Reimplementing minimal preprocessing
-                        spec = stft(noisy)[0] # complex [N, F, T']
-                        mag = spec.abs().unsqueeze(1)
-                        
-                        domain = exp_cfg.get("input_domain", "mag")
-                        if domain == "mag": x_in = mag
-                        elif domain == "log1p_mag": x_in = torch.log1p(mag)
-                        elif domain == "real_imag": x_in = torch.stack([spec.real, spec.imag], dim=1)
-                        elif domain == "real_imag_mag": x_in = torch.stack([spec.real, spec.imag, mag.squeeze(1)], dim=1)
-                        else: x_in = mag
-                        
-                        with torch.no_grad():
-                            out = model(x_in, noisy_mag=mag, noisy_spec=spec)
-                        
-                        if "out_spec" in out:
-                            return istft(out["out_spec"].squeeze(1)).cpu().numpy()
-                        else:
-                            out_mag = out.get("out_mag", (out["mask"] * mag if "mask" in out else mag))
-                            phase = spec / (spec.abs() + 1e-8)
-                            return istft(out_mag.squeeze(1) * phase).cpu().numpy()
-                    return denoise
-
-                fn = _load_exp_unet(model_dir, cfg, nperseg)
+                fn = _load_exp_unet(model_dir, cfg, exp_cfg, nperseg)
                 m_class = 'UnetAutoencoder'
                 if exp_id:
                     m_class = f"UnetAutoencoder_{exp_id}"
@@ -508,33 +494,22 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                 print(f"  [skip] Unknown model: {model_part}")
                 continue
 
-            entries[name] = {
-                'denoise_fn':  fn,
-                'model_class': mc,
-                'noise_type':  noise_type,
-                'is_hybrid':   is_hybrid,
-                'dsge_basis':  basis,
-                'dsge_order':  order,
-                'run_dir':     model_dir,
-            }
             if fn:
-                print(f"  Loaded: {name}")
-            else:
-                print(f"  [warn] Weights not found for: {name}")
-
-        except Exception as e:
-            print(f"  [warn] Failed to load {name}: {e}")
-            # Ensure it's in entries even if failed (important for base models)
-            if name not in entries:
                 entries[name] = {
-                    'denoise_fn':  None,
-                    'model_class': mc if mc else model_part,
+                    'denoise_fn':  fn,
+                    'model_class': mc,
                     'noise_type':  noise_type,
                     'is_hybrid':   is_hybrid,
                     'dsge_basis':  basis,
                     'dsge_order':  order,
                     'run_dir':     model_dir,
                 }
+                print(f"  Loaded: {name}")
+            else:
+                print(f"  [warn] Weights not found for: {name}")
+
+        except Exception as e:
+            print(f"  [warn] Failed to load {name}: {e}")
             continue
 
     return entries
@@ -552,17 +527,22 @@ def cross_evaluate(entries: dict, test_dir: Path, batch_size: int = 512) -> dict
     from tqdm import tqdm
     results = {}
     for name, info in tqdm(entries.items(), desc="Evaluating models", unit="model"):
-        results[name] = {}
-        for test_nt in tqdm(NOISE_TYPES, desc=f"  {name[:28]}", leave=False, unit="noise"):
-            if info.get('denoise_fn') is None:
-                results[name][test_nt] = {'per_snr': {}, 'overall': {}}
-                continue
-            per_snr = evaluate_per_snr(info['denoise_fn'], test_dir, test_nt,
-                                       batch_size=batch_size)
-            results[name][test_nt] = {
-                'per_snr': per_snr,
-                'overall': _aggregate(per_snr),
-            }
+        if info.get('denoise_fn') is None:
+            continue
+            
+        try:
+            model_results = {}
+            for test_nt in tqdm(NOISE_TYPES, desc=f"  {name[:28]}", leave=False, unit="noise"):
+                per_snr = evaluate_per_snr(info['denoise_fn'], test_dir, test_nt,
+                                           batch_size=batch_size)
+                model_results[test_nt] = {
+                    'per_snr': per_snr,
+                    'overall': _aggregate(per_snr),
+                }
+            results[name] = model_results
+        except Exception as e:
+            print(f"  [warn] Failed to evaluate {name}: {e}")
+            continue
     return results
 
 
@@ -707,7 +687,7 @@ def fig2_combined_snr_curves(results: dict, entries: dict, figures_dir: Path) ->
 
         snr_ins = []
         for name, info in entries.items():
-            if info['is_hybrid']:
+            if name not in results or info['is_hybrid']:
                 continue
             mc   = info['model_class']
             nt   = info['noise_type']
@@ -767,13 +747,13 @@ def fig3_per_model_comparison(results: dict, entries: dict, figures_dir: Path) -
     plt.rcParams.update(RCPARAMS)
     base_classes = []
     for n in sorted(results):
-        if entries[n]['is_hybrid']: continue
+        if n not in results or entries[n]['is_hybrid']: continue
         mc = entries[n]['model_class']
         if mc not in base_classes:
             base_classes.append(mc)
             
     hybrid_classes = sorted(
-        set(entries[n]['model_class'] for n in results if entries[n]['is_hybrid']),
+        set(entries[n]['model_class'] for n in results if n in results and entries[n]['is_hybrid']),
         key=_hybrid_sort_key,
     )
     all_classes = base_classes + hybrid_classes
@@ -861,6 +841,8 @@ def fig4_dsge_scatter(results: dict, entries: dict, figures_dir: Path) -> Path:
         ax.grid(True, alpha=0.2)
         seen = set()
         for name in hybrid_by_train[train_nt]:
+            if name not in results:
+                continue
             info = entries[name]
             snr_g  = results[name]['gaussian']['overall'].get('SNR', np.nan)
             snr_ng = results[name]['non_gaussian']['overall'].get('SNR', np.nan)
@@ -956,6 +938,8 @@ def _snr_table(results: dict, entries: dict) -> list[str]:
     base_runs   = [n for n in sorted(results) if not entries[n]['is_hybrid']]
     hybrid_runs = [n for n in sorted(results) if entries[n]['is_hybrid']]
     for name in base_runs + hybrid_runs:
+        if name not in results:
+            continue
         nt  = entries[name]['noise_type']
         snr_g  = results[name]['gaussian']['overall'].get('SNR', float('nan'))
         snr_ng = results[name]['non_gaussian']['overall'].get('SNR', float('nan'))
