@@ -1,0 +1,126 @@
+{
+  "suite_name": "combo_v2",
+  "description": "Iteration-2 combinations around B02 mask3 baseline",
+  "global_defaults": {
+    "architecture": "spectral_unet",
+    "input_domain": "mag",
+    "output_mode": "mask_scaled_sigmoid",
+    "mask_max": 3.0,
+    "pooling_mode": "isotropic",
+    "loss_profile": "mag",
+    "loss_name": null,
+    "nperseg": 128,
+    "hop_length": 32,
+    "lr": 0.001,
+    "weight_decay": 0.0001,
+    "checkpoint_metric": "val_snr",
+    "scheduler_metric": "val_snr",
+    "scheduler_patience": 5,
+    "scheduler_cooldown": 2,
+    "scheduler_factor": 0.5,
+    "scheduler_threshold": 0.02,
+    "min_epochs": 25,
+    "early_stop_patience": 15,
+    "grad_clip_norm": 1.0,
+    "time_loss_weight": 0.03,
+    "mrstft_loss_weight": 0.01,
+    "snr_loss_weight": 0.01
+  },
+  "experiments": [
+    {
+      "id": "M00_B02_repro",
+      "description": "B02 mask3 baseline: scaled sigmoid mask [0,3] with magnitude loss"
+    },
+    {
+      "id": "M01_B01_mask2_repro",
+      "description": "B01 mask2 reproduction: scaled sigmoid mask [0,2]",
+      "mask_max": 2.0
+    },
+    {
+      "id": "M02_B03_softplus_repro",
+      "description": "B03 softplus mask capped at 3",
+      "output_mode": "mask_softplus",
+      "softplus_max": 3.0
+    },
+    {
+      "id": "X01_mask3_time003",
+      "description": "B02 plus light waveform MSE",
+      "loss_profile": "mag_time",
+      "time_loss_weight": 0.03
+    },
+    {
+      "id": "X02_mask3_time010",
+      "description": "B02 plus stronger waveform MSE",
+      "loss_profile": "mag_time",
+      "time_loss_weight": 0.10
+    },
+    {
+      "id": "X03_mask3_time003_mrstft001",
+      "description": "B02 plus conservative waveform and MR-STFT loss",
+      "loss_profile": "mag_time_mrstft",
+      "time_loss_weight": 0.03,
+      "mrstft_loss_weight": 0.01
+    },
+    {
+      "id": "X04_mask3_time005_mrstft002",
+      "description": "B02 plus medium waveform and MR-STFT loss",
+      "loss_profile": "mag_time_mrstft",
+      "time_loss_weight": 0.05,
+      "mrstft_loss_weight": 0.02
+    },
+    {
+      "id": "X05_mask3_snr_aux001",
+      "description": "B02 plus negative SNR auxiliary loss",
+      "loss_profile": "mag_time_mrstft_snr",
+      "time_loss_weight": 0.03,
+      "mrstft_loss_weight": 0.01,
+      "snr_loss_weight": 0.01
+    },
+    {
+      "id": "X06_mask3_hop16",
+      "description": "B02 with hop length 16",
+      "hop_length": 16
+    },
+    {
+      "id": "X07_mask3_aniso",
+      "description": "B02 with anisotropic pooling preserving time",
+      "pooling_mode": "freq_only_first2"
+    },
+    {
+      "id": "X08_mask3_hop16_aniso",
+      "description": "B02 with hop length 16 and anisotropic pooling",
+      "hop_length": 16,
+      "pooling_mode": "freq_only_first2"
+    },
+    {
+      "id": "X09_mask3_aniso_mrstft_low",
+      "description": "B02 with anisotropic pooling and conservative composite loss",
+      "pooling_mode": "freq_only_first2",
+      "loss_profile": "mag_time_mrstft",
+      "time_loss_weight": 0.03,
+      "mrstft_loss_weight": 0.01
+    },
+    {
+      "id": "X10_softplus3_time003_mrstft001",
+      "description": "Softplus mask capped at 3 with conservative composite loss",
+      "output_mode": "mask_softplus",
+      "softplus_max": 3.0,
+      "loss_profile": "mag_time_mrstft",
+      "time_loss_weight": 0.03,
+      "mrstft_loss_weight": 0.01
+    },
+    {
+      "id": "X11_softplus3_aniso",
+      "description": "Softplus mask capped at 3 with anisotropic pooling",
+      "output_mode": "mask_softplus",
+      "softplus_max": 3.0,
+      "pooling_mode": "freq_only_first2"
+    },
+    {
+      "id": "X12_mask2_aniso",
+      "description": "Scaled sigmoid mask [0,2] with anisotropic pooling",
+      "mask_max": 2.0,
+      "pooling_mode": "freq_only_first2"
+    }
+  ]
+}
