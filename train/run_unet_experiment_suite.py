@@ -59,18 +59,39 @@ def main():
     fs = args.fs if args.fs else ds_cfg.get("sample_rate", 8192)
 
     with open(args.config, "r") as f:
-        experiments = json.load(f)
+        raw_config = json.load(f)
+
+    # Support both old flat-list format and new suite format with global_defaults
+    if isinstance(raw_config, list):
+        experiments = raw_config
+        global_defaults = {}
+        suite_name = None
+    else:
+        global_defaults = raw_config.get("global_defaults", {})
+        suite_name = raw_config.get("suite_name")
+        raw_experiments = raw_config.get("experiments", [])
+        # Normalise: merge global_defaults into each experiment, rename "id" -> "exp_id"
+        experiments = []
+        for exp in raw_experiments:
+            merged = dict(global_defaults)
+            merged.update(exp)
+            if "id" in merged and "exp_id" not in merged:
+                merged["exp_id"] = merged.pop("id")
+            experiments.append(merged)
 
     if args.run_id:
         run_id = args.run_id
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        run_id = f"unet_ablation_{timestamp}"
+        prefix = suite_name if suite_name else "unet_ablation"
+        run_id = f"{prefix}_{timestamp}"
     
     suite_dir = dataset_dir / "runs" / run_id
     suite_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"🚀 Starting U-Net Experiment Suite: {run_id}")
+    if suite_name:
+        print(f"Suite: {suite_name}")
     print(f"Total experiments: {len(experiments)}")
 
     if args.noise_types == "all":
@@ -108,8 +129,17 @@ def main():
                 cmd.extend(["--device", args.device])
             
             # Add experiment specific args
+            # Keys that are suite-level metadata or handled by CLI args directly
+            skip_keys = {
+                "exp_id", "description", "architecture",
+                "scheduler_patience", "scheduler_cooldown",
+                "scheduler_factor", "scheduler_threshold",
+            }
             for k, v in exp.items():
-                if k == "exp_id": continue
+                if k in skip_keys:
+                    continue
+                if v is None:
+                    continue
                 arg_name = "--" + k.replace("_", "-")
                 if isinstance(v, bool):
                     if v:
@@ -120,23 +150,13 @@ def main():
             # Pass exp_id explicitly
             cmd.extend(["--exp-id", exp_id])
             
-            # Set output directory to sub-run dir
-            # Note: training_uae.py might need to be updated to handle output-dir correctly
-            # In my previous update I added output_dir to UnetAutoencoderTrainer but not to CLI.
-            # I'll fix training_uae.py CLI later. For now I'll assume it's there.
-            # Wait, I didn't add --output-dir to training_uae.py CLI in the previous step.
-            
             print(f"\n--- Running Experiment: {exp_id} ({nt}) ---")
             print(f"Command: {' '.join(cmd)}")
             commands.append({"exp_id": exp_id, "noise_type": nt, "cmd": " ".join(cmd)})
             
             try:
-                # We need to pass output_dir to the subprocess.
-                # Let's use an environment variable or update training_uae.py CLI.
-                # Updating CLI is better.
                 env = os.environ.copy()
                 env["PYTHONPATH"] = str(ROOT)
-                # I'll update training_uae.py to accept --output-dir
                 cmd.extend(["--output-dir", str(exp_dir)])
                 
                 subprocess.run(cmd, check=True, env=env)
