@@ -19,7 +19,7 @@ from train.compare_report import run_compare_report
 def main():
     parser = argparse.ArgumentParser(description="Run U-Net experiment suite")
     parser.add_argument("--dataset", required=False, default=os.getenv("DATASET_NAME"))
-    parser.add_argument("--config", required=False, default=os.getenv("CONFIG_PATH", "train/unet_experiment_configs/core_v1.json"), help="Path to experiment config JSON")
+    parser.add_argument("--config", required=False, default=os.getenv("CONFIG_PATH", "train/unet_experiment_configs/infra_v2.json"), help="Path to experiment config JSON")
     parser.add_argument("--noise-types", default="all")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=1024)
