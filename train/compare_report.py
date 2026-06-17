@@ -341,56 +341,64 @@ def _load_wavelet(run_dir: Path):
 
 def _load_exp_unet(m_dir, m_cfg, exp_cfg, n_ps=128):
     import torch
-    from models.autoencoder_unet import UnetAutoencoder
-    device = _device()
-    fs = m_cfg['sample_rate']; sig_len = m_cfg['block_size']
-    # Use params from exp_cfg if available
-    n_ps = exp_cfg.get("nperseg", n_ps)
-    n_ov = exp_cfg.get("noverlap", n_ps * 3 // 4)
-    stft, istft = _torch_stft_helpers(n_ps, n_ov, sig_len, device)
-    
-    # Estimate input shape
-    dummy_spec, _ = stft(np.zeros((1, sig_len), dtype=np.float32))
-    f_bins, t_frames = dummy_spec.shape[-2], dummy_spec.shape[-1]
-    
-    in_ch = 1
-    if exp_cfg.get("input_domain") in ["real_imag", "real_imag_mag"]:
-        in_ch = 2 if exp_cfg.get("input_domain") == "real_imag" else 3
+    from models.unet_registry import load_model_from_dir
+    from models.stft_projector import STFTProjector
 
-    model = UnetAutoencoder(
-        input_shape=(f_bins, t_frames),
-        in_channels=in_ch,
-        pooling_mode=exp_cfg.get("pooling_mode", "isotropic"),
-        output_mode=exp_cfg.get("output_mode", "mask_sigmoid"),
-        mask_max=exp_cfg.get("mask_max", 1.0),
-        softplus_max=exp_cfg.get("softplus_max", 3.0),
-    ).to(device)
-    model.load_state_dict(torch.load(m_dir / 'model_best_snr.pth', map_location=device))
+    device = _device()
+    sig_len = m_cfg['block_size']
+
+    model, model_config = load_model_from_dir(m_dir, device=device)
     model.eval()
 
+    arch = model_config.get("architecture", "spectral_unet")
+    input_domain = model_config.get("input_domain", "mag")
+    hop = model_config.get("hop_length", n_ps // 4)
+    n_ps = model_config.get("nperseg", n_ps)
+    stft_proj = STFTProjector(n_ps, hop, sig_len)
+
+    if arch == "waveunet1d":
+        def denoise(noisy):
+            x = torch.tensor(noisy, dtype=torch.float32, device=device)
+            with torch.no_grad():
+                out = model(x.unsqueeze(1))
+                return (x - out["pred_noise"].squeeze(1)).cpu().numpy()
+        return denoise
+
+    # All spectral architectures (spectral_unet, spectral_resunet, complex_crm_unet, complex_stft_unet)
     def denoise(noisy):
-        from train.training_uae import UnetAutoencoderTrainer
-        # We need a dummy trainer to use its preprocessing or just reimplement
-        # Reimplementing minimal preprocessing
-        spec = stft(noisy)[0] # complex [N, F, T']
+        x = torch.tensor(noisy, dtype=torch.float32, device=device)
+        spec = stft_proj.stft(x)
         mag = spec.abs().unsqueeze(1)
-        
-        domain = exp_cfg.get("input_domain", "mag")
-        if domain == "mag": x_in = mag
-        elif domain == "log1p_mag": x_in = torch.log1p(mag)
-        elif domain == "real_imag": x_in = torch.stack([spec.real, spec.imag], dim=1)
-        elif domain == "real_imag_mag": x_in = torch.stack([spec.real, spec.imag, mag.squeeze(1)], dim=1)
-        else: x_in = mag
-        
+
+        if input_domain == "mag":
+            x_in = mag
+        elif input_domain == "log1p_mag":
+            x_in = torch.log1p(mag)
+        elif input_domain == "real_imag":
+            x_in = torch.stack([spec.real, spec.imag], dim=1)
+        elif input_domain == "real_imag_mag":
+            x_in = torch.stack([spec.real, spec.imag, mag.squeeze(1)], dim=1)
+        else:
+            x_in = mag
+
         with torch.no_grad():
             out = model(x_in, noisy_mag=mag, noisy_spec=spec)
-        
+
+        if "out_wave" in out:
+            return out["out_wave"].cpu().numpy()
         if "out_spec" in out:
-            return istft(out["out_spec"].squeeze(1)).cpu().numpy()
-        else:
-            out_mag = out.get("out_mag", (out["mask"] * mag if "mask" in out else mag))
+            os_ = out["out_spec"]
+            if os_.dim() == 4:
+                os_ = os_.squeeze(1)
+            return stft_proj.istft(os_, sig_len).cpu().numpy()
+        if "out_mag" in out:
             phase = spec / (spec.abs() + 1e-8)
-            return istft(out_mag.squeeze(1) * phase).cpu().numpy()
+            return stft_proj.istft(out["out_mag"].squeeze(1) * phase, sig_len).cpu().numpy()
+        # fallback: mask × input mag
+        mask = out.get("mask", torch.ones_like(mag))
+        phase = spec / (spec.abs() + 1e-8)
+        return stft_proj.istft(mask.squeeze(1) * mag.squeeze(1) * phase, sig_len).cpu().numpy()
+
     return denoise
 
 
@@ -422,9 +430,8 @@ def discover_runs(run_dir: Path, cfg: dict, nperseg: int = 128) -> dict:
                 run_id_val = exp_cfg.get("run_id")
                 
                 fn = _load_exp_unet(model_dir, cfg, exp_cfg, nperseg)
-                m_class = 'UnetAutoencoder'
-                if exp_id:
-                    m_class = f"UnetAutoencoder_{exp_id}"
+                arch = exp_cfg.get("architecture", "spectral_unet")
+                m_class = arch if not exp_id else f"{arch}_{exp_id}"
                 
                 entries[name] = {
                     'denoise_fn':  fn,
