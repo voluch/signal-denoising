@@ -4,20 +4,46 @@ on:
   workflow_dispatch:
     inputs:
       gpu_type:
-        description: 'GPU Type'
+        description: 'Primary GPU type (first choice). See gpu_fallback to add alternatives.'
         required: true
         type: choice
         default: 'NVIDIA RTX A5000'
         options:
+          # ── 48 GB ──────────────────────────────────────────
+          - NVIDIA A40
+          - NVIDIA RTX A6000
+          - NVIDIA L40
+          # ── 32 GB ──────────────────────────────────────────
+          - NVIDIA GeForce RTX 5090
+          - NVIDIA RTX 5000 Ada Generation
+          - Tesla V100-SXM2-32GB
+          # ── 24 GB ──────────────────────────────────────────
+          - NVIDIA A30
+          - NVIDIA L4
           - NVIDIA GeForce RTX 3090
+          - NVIDIA GeForce RTX 3090 Ti
           - NVIDIA GeForce RTX 4090
-          - NVIDIA RTX A2000
-          - NVIDIA RTX A2000 Ada
+          - NVIDIA RTX A5000
+          # ── 20 GB ──────────────────────────────────────────
+          - NVIDIA RTX A4500
+          - NVIDIA RTX 4000 Ada Generation
+          - NVIDIA RTX 4000 SFF Ada Generation
+          # ── 16 GB ──────────────────────────────────────────
           - NVIDIA RTX A4000
           - NVIDIA RTX A4000 Ada
-          - NVIDIA RTX A4500
-          - NVIDIA RTX A5000
-          - NVIDIA RTX A6000
+          - NVIDIA RTX 2000 Ada Generation
+          - NVIDIA GeForce RTX 4080
+          - NVIDIA GeForce RTX 4080 SUPER
+          - NVIDIA GeForce RTX 5080
+
+      gpu_fallback:
+        description: |
+          Fallback GPU types to try if the primary GPU is unavailable (comma-separated).
+          All selected GPU types are tried across all candidate datacenters in order.
+          Example: NVIDIA RTX A4000, NVIDIA L4, NVIDIA GeForce RTX 3090
+        required: false
+        type: string
+        default: ''
 
       deploy_scope:
         description: 'Region scope for auto-placement'
@@ -27,7 +53,12 @@ on:
         options:
           - EU
           - US
+          - CA
+          - APAC
           - EU+US
+          - EU+APAC
+          - US+APAC
+          - EU+US+APAC
           - ALL
 
       storage_size_gb:
@@ -254,6 +285,7 @@ jobs:
           export TEMPLATE_ID="${{ steps.template.outputs.template_id }}"
           export IMAGE_URI="${{ steps.image.outputs.image_uri }}"
           export GPU_TYPE="${{ inputs.gpu_type }}"
+          export GPU_FALLBACK="${{ inputs.gpu_fallback }}"
           export USE_SPOT="${{ inputs.use_spot }}"
           export USE_NETWORK_VOLUME="false"
           export REPLACE="${{ inputs.replace_existing_pod }}"
@@ -306,7 +338,9 @@ jobs:
           echo "| **Pod URL** | [${{ steps.pod.outputs.pod_url }}](${{ steps.pod.outputs.pod_url }}) |" >> $GITHUB_STEP_SUMMARY
           echo "| **Template** | \`${{ steps.template.outputs.template_id }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Registry** | \`${{ steps.registry.outputs.registry_id }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| **GPU** | ${{ inputs.gpu_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GPU (requested)** | ${{ inputs.gpu_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GPU (deployed)** | ${{ steps.pod.outputs.final_gpu }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **GPU Fallbacks** | \`${{ inputs.gpu_fallback }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| **Deploy Scope** | ${{ inputs.deploy_scope }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Chosen Data Center** | ${{ steps.pod.outputs.datacenter }} |" >> $GITHUB_STEP_SUMMARY
           echo "| **Storage Size** | ${{ inputs.storage_size_gb }} GB |" >> $GITHUB_STEP_SUMMARY

@@ -25,18 +25,27 @@ VOLUME_SIZE_GB = int(os.environ.get("VOLUME_SIZE_GB", "30"))
 VOLUME_MOUNT_PATH = os.environ.get("VOLUME_MOUNT_PATH", "/app/data")
 NETWORK_VOLUME_ID = os.environ.get("NETWORK_VOLUME_ID")
 
-# Optional grouping input if you add it later
 DEPLOY_SCOPE = os.environ.get("DEPLOY_SCOPE", "EU+US").upper()
+
+# Build ordered list of GPU types to try: primary first, then fallbacks.
+_gpu_fallback_raw = os.environ.get("GPU_FALLBACK", "").strip()
+GPU_TYPES: List[str] = [GPU_TYPE]
+if _gpu_fallback_raw:
+    GPU_TYPES += [g.strip() for g in _gpu_fallback_raw.replace("\n", ",").split(",") if g.strip()]
 
 # ----------------------------
 # Region candidates
-# Keep these to known/current IDs from Runpod docs/examples.
+# IDs from RunPod docs / blog posts (runpod.io/blog/runpod-global-networking-expansion,
+# runpod.io/blog/runpod-apac-launch-fukushima).
 # ----------------------------
 EU_DCS = [
     "EU-NL-1",
     "EU-RO-1",
     "EU-CZ-1",
+    "EU-FR-1",
+    "EU-SE-1",
     "EUR-IS-1",
+    "EUR-IS-2",
     "EUR-IS-3",
     "EUR-NO-1",
 ]
@@ -44,9 +53,12 @@ EU_DCS = [
 US_DCS = [
     "US-IL-1",
     "US-TX-3",
+    "US-TX-4",
     "US-KS-2",
     "US-GA-2",
     "US-WA-1",
+    "US-CA-2",
+    "US-DE-1",
     "US-MO-2",
     "US-NC-1",
 ]
@@ -54,6 +66,11 @@ US_DCS = [
 CA_DCS = [
     "CA-MTL-4",
     "CA-MTL-3",
+]
+
+APAC_DCS = [
+    "AP-JP-1",   # Japan (Fukushima) — first APAC datacenter
+    "OC-AU-1",   # Australia
 ]
 
 
@@ -71,23 +88,23 @@ def get_candidate_datacenters(
         deploy_scope: str,
 ) -> List[str]:
     if preferred_dc and preferred_dc != "AUTO":
-        pool = EU_DCS + US_DCS + CA_DCS
+        pool = EU_DCS + US_DCS + CA_DCS + APAC_DCS
         if preferred_dc in pool:
             return [preferred_dc] + [dc for dc in pool if dc != preferred_dc]
         return [preferred_dc]
 
-    if deploy_scope == "EU":
-        return EU_DCS[:]
-    if deploy_scope == "US":
-        return US_DCS[:]
-    if deploy_scope == "CA":
-        return CA_DCS[:]
-    if deploy_scope == "EU+US":
-        return EU_DCS + US_DCS
-    if deploy_scope == "ALL":
-        return EU_DCS + US_DCS + CA_DCS
-
-    return EU_DCS + US_DCS
+    scope_map = {
+        "EU":          EU_DCS,
+        "US":          US_DCS,
+        "CA":          CA_DCS,
+        "APAC":        APAC_DCS,
+        "EU+US":       EU_DCS + US_DCS,
+        "EU+APAC":     EU_DCS + APAC_DCS,
+        "US+APAC":     US_DCS + APAC_DCS,
+        "EU+US+APAC":  EU_DCS + US_DCS + APAC_DCS,
+        "ALL":         EU_DCS + US_DCS + CA_DCS + APAC_DCS,
+    }
+    return scope_map.get(deploy_scope, EU_DCS + US_DCS)[:]
 
 
 def get_network_volume_datacenter(network_volume_id: str) -> str:
@@ -214,7 +231,7 @@ def resolve_pod_name() -> str:
         n += 1
 
 
-def build_mutation_for_dc(dc: str, pod_name: str) -> str:
+def build_mutation_for_dc(dc: str, pod_name: str, gpu_type: str) -> str:
     mutation_name = "podRentInterruptable" if USE_SPOT else "podFindAndDeployOnDemand"
     bid_line = "bidPerGpu: 0.0" if USE_SPOT else ""
 
@@ -226,7 +243,7 @@ def build_mutation_for_dc(dc: str, pod_name: str) -> str:
             {bid_line}
             cloudType: SECURE
             gpuCount: 1
-            gpuTypeId: "{GPU_TYPE}"
+            gpuTypeId: "{gpu_type}"
             name: "{pod_name}"
             templateId: "{TEMPLATE_ID}"
             dataCenterId: "{dc}"
@@ -237,7 +254,7 @@ def build_mutation_for_dc(dc: str, pod_name: str) -> str:
             {bid_line}
             cloudType: SECURE
             gpuCount: 1
-            gpuTypeId: "{GPU_TYPE}"
+            gpuTypeId: "{gpu_type}"
             name: "{pod_name}"
             templateId: "{TEMPLATE_ID}"
             dataCenterId: "{dc}"
@@ -258,54 +275,57 @@ def build_mutation_for_dc(dc: str, pod_name: str) -> str:
 
 
 def deploy_with_fallback(dcs_to_try: List[str], pod_name: str) -> Dict[str, Any]:
+    """Try each GPU type across all candidate DCs before moving to the next GPU type."""
     mutation_name = "podRentInterruptable" if USE_SPOT else "podFindAndDeployOnDemand"
     last_error = None
 
-    for dc in dcs_to_try:
-        print(f"Trying datacenter: {dc}")
+    retryable_markers = [
+        "not available",
+        "no longer any instances",
+        "insufficient",
+        "capacity",
+        "unavailable",
+    ]
 
-        mutation = build_mutation_for_dc(dc, pod_name)
+    for gpu_type in GPU_TYPES:
+        print(f"\n── GPU: {gpu_type} ──")
+        for dc in dcs_to_try:
+            print(f"  Trying datacenter: {dc}")
+            mutation = build_mutation_for_dc(dc, pod_name, gpu_type)
 
-        try:
-            result = graphql.run_graphql_query(mutation)
+            try:
+                result = graphql.run_graphql_query(mutation)
 
-            if result.get("errors"):
-                raise RuntimeError(result["errors"][0]["message"])
+                if result.get("errors"):
+                    raise RuntimeError(result["errors"][0]["message"])
 
-            pod_data = result["data"][mutation_name]
-            if not pod_data or not pod_data.get("id"):
-                raise RuntimeError(f"Create pod returned empty data for {dc}")
+                pod_data = result["data"][mutation_name]
+                if not pod_data or not pod_data.get("id"):
+                    raise RuntimeError(f"Create pod returned empty data for {dc}")
 
-            print(f"Deployment initiated in {dc}")
-            return {
-                "pod_id": pod_data["id"],
-                "final_dc": dc,
-                "desired_status": pod_data.get("desiredStatus", "unknown"),
-            }
+                print(f"  Deployment initiated — GPU: {gpu_type}, DC: {dc}")
+                return {
+                    "pod_id": pod_data["id"],
+                    "final_dc": dc,
+                    "final_gpu": gpu_type,
+                    "desired_status": pod_data.get("desiredStatus", "unknown"),
+                }
 
-        except Exception as e:
-            last_error = e
-            msg = str(e).lower()
-            print(f"Failed in {dc}: {e}")
+            except Exception as e:
+                last_error = e
+                msg = str(e).lower()
+                print(f"  Failed ({dc}): {e}")
 
-            retryable_markers = [
-                "not available",
-                "no longer any instances",
-                "insufficient",
-                "capacity",
-                "unavailable",
-            ]
+                if "network volume" in msg:
+                    raise RuntimeError(
+                        f"Network volume issue in {dc}: {e}. "
+                        "Network volumes are datacenter-specific."
+                    ) from e
 
-            if any(marker in msg for marker in retryable_markers):
+                if any(marker in msg for marker in retryable_markers):
+                    continue
+
                 continue
-
-            if "network volume" in msg:
-                raise RuntimeError(
-                    f"Network volume issue in {dc}: {e}. "
-                    "Network volumes are datacenter-specific."
-                ) from e
-
-            continue
 
     raise RuntimeError(f"All deployment attempts failed. Last error: {last_error}")
 
@@ -319,7 +339,7 @@ def manage_pod() -> None:
     print(f"Requested DC: {DATA_CENTER_ID}")
     print(f"Scope: {DEPLOY_SCOPE}")
     print(f"Image: {IMAGE_URI}")
-    print(f"GPU: {GPU_TYPE}")
+    print(f"GPUs to try: {', '.join(GPU_TYPES)}")
     print(f"Type: {'Spot' if USE_SPOT else 'On-Demand'}")
     print(f"Replace: {REPLACE}")
     print(f"Use network volume: {USE_NETWORK_VOLUME}")
@@ -339,6 +359,7 @@ def manage_pod() -> None:
     deployment = deploy_with_fallback(dcs_to_try, actual_pod_name)
     pod_id = deployment["pod_id"]
     final_dc = deployment["final_dc"]
+    final_gpu = deployment["final_gpu"]
 
     print("Waiting for pod runtime...")
     full_pod = wait_for_pod_runtime(pod_id)
@@ -352,7 +373,7 @@ def manage_pod() -> None:
     print(f"Pod ID:        {pod_id}")
     print(f"Pod URL:       {pod_url}")
     print(f"Template ID:   {TEMPLATE_ID}")
-    print(f"GPU Type:      {GPU_TYPE}")
+    print(f"GPU Type:      {final_gpu}")
     print(f"Instance Type: {'Spot' if USE_SPOT else 'On-Demand'}")
     print(f"Datacenter:    {final_dc}")
     print(f"Image:         {IMAGE_URI}")
@@ -366,6 +387,7 @@ def manage_pod() -> None:
         action="deployed",
         template_id=TEMPLATE_ID,
         datacenter=final_dc,
+        final_gpu=final_gpu,
         network_volume_id=NETWORK_VOLUME_ID or "",
     )
 
