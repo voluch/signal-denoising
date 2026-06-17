@@ -131,7 +131,7 @@ def main():
             # Add experiment specific args
             # Keys that are suite-level metadata or handled by CLI args directly
             skip_keys = {
-                "exp_id", "description", "architecture",
+                "exp_id", "description",
                 "scheduler_patience", "scheduler_cooldown",
                 "scheduler_factor", "scheduler_threshold",
             }

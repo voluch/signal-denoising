@@ -3,8 +3,8 @@ cd signal-denoising
 git checkout unet-experiments
 pip install --no-cache-dir -r requirements.txt &&     rm -rf /root/.cache/pip
 pip install --no-cache-dir -r requirements-cuda.txt &&     rm -rf /root/.cache/pip
-export AWS_ACCESS_KEY_ID=key
-export AWS_SECRET_ACCESS_KEY=key
+export AWS_ACCESS_KEY_ID="key"
+export AWS_SECRET_ACCESS_KEY="key"
 export AWS_REGION="us-east-1"
 export S3_BUCKET="signal-denoising-datasets"
 export DATASET_NAME="deep_space_polygauss_qpsk_bs1024_n3000_993897f3"
